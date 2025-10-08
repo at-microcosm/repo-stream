@@ -1,0 +1,18 @@
+[package]
+name = "repo-stream"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ipld-core = { version = "0.4.2", features = ["serde"] }
+iroh-car = "0.5.1"
+log = "0.4.28"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_ipld_dagcbor = "0.6.4"
+thiserror = "2.0.17"
+tokio = "1.47.1"
+
+[dev-dependencies]
+clap = { version = "4.5.48", features = ["derive"] }
+env_logger = "0.11.8"
+tokio = { version = "1.47.1", features = ["full"] }
