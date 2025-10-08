@@ -3,7 +3,6 @@
 //! The primary aim is to work through the **tree** structure. Non-node blocks
 //! are left as raw bytes, for upper levels to parse into DAG-CBOR or whatever.
 
-use ipld_core::ipld::Ipld;
 use ipld_core::cid::Cid;
 use serde::Deserialize;
 
@@ -34,7 +33,8 @@ pub struct Commit {
     /// issues.
     pub prev: Option<Cid>,
     /// cryptographic signature of this commit, as raw bytes
-    pub sig: ipld_core::ipld::Ipld, // TODO (vec<u8> fails with Mismatch { expect_major: 4, byte: 88 })
+    #[serde(with = "serde_bytes")]
+    pub sig: Vec<u8>,
 }
 
 /// MST node data schema
@@ -76,8 +76,8 @@ pub struct Entry {
     #[serde(rename = "p")]
     pub prefix_len: usize,
     /// remainder of key for this TreeEntry, after "prefixlen" have been removed
-    #[serde(rename = "k")]
-    pub keysuffix: Ipld, // can we String this here?
+    #[serde(rename = "k", with = "serde_bytes")]
+    pub keysuffix: Vec<u8>, // can we String this here?
     /// link to the record data (CBOR) for this entry
     #[serde(rename = "v")]
     pub value: Cid,

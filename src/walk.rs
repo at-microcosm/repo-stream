@@ -1,6 +1,5 @@
 //! Depth-first MST traversal
 
-use ipld_core::ipld::Ipld;
 use crate::mst::Node;
 use std::collections::HashMap;
 use ipld_core::cid::Cid;
@@ -40,10 +39,7 @@ fn needs_from_node(node: Node) -> Vec<Need> {
     }
     let mut prefix = vec![];
     for (i, entry) in node.entries.into_iter().enumerate() {
-        let suffix = match entry.keysuffix {
-            Ipld::Bytes(data) => data,
-            _ => panic!("booo"),
-        };
+        let suffix = entry.keysuffix;
         let mut rkey = Vec::with_capacity(prefix.len() + suffix.len());
         rkey.extend_from_slice(&prefix);
         rkey.extend_from_slice(&suffix);
