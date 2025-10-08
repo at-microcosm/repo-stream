@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+futures = "0.3.31"
+futures-core = "0.3.31"
 ipld-core = { version = "0.4.2", features = ["serde"] }
 iroh-car = "0.5.1"
 log = "0.4.28"

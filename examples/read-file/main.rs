@@ -1,6 +1,9 @@
 extern crate repo_stream;
 use clap::Parser;
 use std::path::PathBuf;
+use iroh_car::CarReader;
+use futures::TryStreamExt;
+
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
@@ -17,7 +20,29 @@ async fn main() -> Result<()> {
     let reader = tokio::fs::File::open(file).await?;
 
     println!("hello!");
-    repo_stream::drive::drive(reader).await?;
+
+    let reader = CarReader::new(reader).await?;
+
+    let root = reader
+        .header()
+        .roots()
+        .first()
+        .ok_or("missing root")?
+        .clone();
+    log::debug!("root: {root:?}");
+
+    // let stream = Box::pin(reader.stream());
+    let stream = std::pin::pin!(reader.stream());
+
+    let (commit, v) = repo_stream::drive::Vehicle::init(&root, stream).await?;
+    let mut record_stream = std::pin::pin!(v.stream());
+
+    log::info!("got commit: {commit:?}");
+
+    while let Some((rkey, rec)) = record_stream.try_next().await? {
+        log::info!("got {rkey:?} {}", rec.len());
+    }
+    log::info!("bye!");
 
     Ok(())
 }
