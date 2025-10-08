@@ -1,8 +1,8 @@
 //! Depth-first MST traversal
 
 use crate::mst::Node;
-use std::collections::HashMap;
 use ipld_core::cid::Cid;
+use std::collections::HashMap;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Trip {
@@ -16,19 +16,13 @@ pub enum Trip {
 pub enum Step {
     Rest,
     Finish,
-    Step {
-        rkey: Vec<u8>,
-        data: Vec<u8>
-    },
+    Step { rkey: Vec<u8>, data: Vec<u8> },
 }
 
 #[derive(Debug)]
 enum Need {
     Node(Cid),
-    Record {
-        rkey: Vec<u8>,
-        cid: Cid,
-    },
+    Record { rkey: Vec<u8>, cid: Cid },
     AcutallyDone,
 }
 
@@ -46,16 +40,18 @@ fn needs_from_node(node: Node) -> Vec<Need> {
         if i == 0 {
             prefix.extend_from_slice(&suffix);
         }
-        out.push(Need::Record { rkey, cid: entry.value });
+        out.push(Need::Record {
+            rkey,
+            cid: entry.value,
+        });
         if let Some(child_cid) = entry.tree {
-            out.push(Need::Node(child_cid.clone()));
+            out.push(Need::Node(child_cid));
         }
     }
     // stack is right-to-left, for our left-to-right traversal
     out.reverse();
     out
 }
-
 
 #[derive(Debug)]
 pub struct Walker {
@@ -76,7 +72,7 @@ impl Walker {
             match &mut self.current {
                 Need::Node(cid) => {
                     log::trace!("need node {cid:?}");
-                    let Some(block) = blocks.remove(&cid) else {
+                    let Some(block) = blocks.remove(cid) else {
                         log::trace!("node not found, resting");
                         return Ok(Step::Rest);
                     };
@@ -94,7 +90,7 @@ impl Walker {
                 }
                 Need::Record { rkey, cid } => {
                     log::trace!("need record {cid:?}");
-                    let Some(data) = blocks.get(&cid) else {
+                    let Some(data) = blocks.get(cid) else {
                         log::trace!("record block not found, resting");
                         return Ok(Step::Rest);
                     };

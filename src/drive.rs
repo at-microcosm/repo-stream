@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::error::Error;
 
 use crate::mst::Commit;
-use crate::walk::{Walker, Step, Trip};
+use crate::walk::{Step, Trip, Walker};
 
 #[derive(Debug, thiserror::Error)]
 pub enum DriveError {
@@ -35,7 +35,7 @@ pub struct Rkey(pub String);
 
 pub struct Vehicle<E, S: Stream<Item = CarBlock<E>>> {
     block_stream: S,
-    blocks: HashMap::<Cid, Vec<u8>>,
+    blocks: HashMap<Cid, Vec<u8>>,
     walker: Walker,
     walked_out: bool,
 }
@@ -48,7 +48,8 @@ impl<E: Error + 'static, S: Stream<Item = CarBlock<E>> + Unpin> Vehicle<E, S> {
         while let Some((block_cid, data)) = block_stream
             .try_next()
             .await
-            .map_err(|e| DriveError::CarBlockError(e.into()))? {
+            .map_err(|e| DriveError::CarBlockError(e.into()))?
+        {
             if block_cid == *root {
                 let c: Commit = serde_ipld_dagcbor::from_slice(&data)
                     .map_err(|e| DriveError::BadCommit(e.into()))?;
@@ -56,19 +57,20 @@ impl<E: Error + 'static, S: Stream<Item = CarBlock<E>> + Unpin> Vehicle<E, S> {
                 break; // inner while
             }
             blocks.insert(block_cid, data);
-        };
+        }
 
         // we either broke out or read all the blocks without finding the commit...
         let commit = commit.ok_or(DriveError::MissingCommit)?;
 
-        let walker = Walker::new(commit.data.clone());
+        let walker = Walker::new(commit.data);
 
-        Ok((commit, Self {
+        let me = Self {
             block_stream,
             blocks,
             walker,
             walked_out: false,
-        }))
+        };
+        Ok((commit, me))
     }
 
     pub async fn next_record(&mut self) -> Result<Option<(Rkey, Vec<u8>)>, DriveError> {
@@ -94,28 +96,25 @@ async fn drive_ahead<E: Error + 'static, S: Stream<Item = CarBlock<E>> + Unpin>(
                 .try_next()
                 .await
                 .map_err(|e| DriveError::CarBlockError(e.into()))?
-             else {
+            else {
                 return Err(DriveError::Dnf);
             };
             vehicle.blocks.insert(cid, data);
             vehicle.walked_out = false;
         }
         // walk as far as we can until we run out of blocks or find a record
-        loop {
-            match vehicle.walker.walk(&mut vehicle.blocks)? {
-                Step::Rest => {
-                    log::trace!("walker is resting, get another block");
-                    vehicle.walked_out = true;
-                    break; // inner
-                }
-                Step::Finish => {
-                    log::trace!("walker finished");
-                    return Ok(None);
-                }
-                Step::Step { rkey, data } => {
-                    let rkey = String::from_utf8(rkey).map_err(|_| DriveError::BadRkey)?;
-                    return Ok(Some((Rkey(rkey), data)));
-                }
+        match vehicle.walker.walk(&mut vehicle.blocks)? {
+            Step::Rest => {
+                log::trace!("walker is resting, get another block");
+                vehicle.walked_out = true;
+            }
+            Step::Finish => {
+                log::trace!("walker finished");
+                return Ok(None);
+            }
+            Step::Step { rkey, data } => {
+                let rkey = String::from_utf8(rkey).map_err(|_| DriveError::BadRkey)?;
+                return Ok(Some((Rkey(rkey), data)));
             }
         }
     }

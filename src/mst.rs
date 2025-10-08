@@ -6,7 +6,6 @@
 use ipld_core::cid::Cid;
 use serde::Deserialize;
 
-
 /// The top-level data object in a repository's tree is a signed commit.
 #[derive(Debug, Deserialize)]
 // #[serde(deny_unknown_fields)]

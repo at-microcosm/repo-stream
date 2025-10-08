@@ -1,15 +1,15 @@
 extern crate repo_stream;
 use clap::Parser;
-use std::path::PathBuf;
-use iroh_car::CarReader;
 use futures::TryStreamExt;
-
+use iroh_car::CarReader;
+use std::path::PathBuf;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 #[derive(Debug, Parser)]
 struct Args {
-    #[arg()] file: PathBuf,
+    #[arg()]
+    file: PathBuf,
 }
 
 #[tokio::main]
