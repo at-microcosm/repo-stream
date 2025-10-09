@@ -30,34 +30,20 @@ fn needs_from_node(node: Node) -> Vec<Need> {
     if let Some(left_cid) = node.left {
         out.push(Need::Node(left_cid));
     }
-    let prefix = if !node.entries.is_empty() {
-        String::from_utf8(node.entries[0].keysuffix.to_vec()).unwrap()
-    } else {
-        "".to_string()
-    };
 
+    let mut prefix = vec![];
     for entry in &node.entries {
-        let pre = &prefix[..entry.prefix_len];
-        let suf = String::from_utf8(entry.keysuffix.to_vec()).unwrap();
-        let rkey = format!("{pre}{suf}");
-        // if !rkey.contains('/') {
-        //     println!("weird for entries: {:?}", node.entries);
-        // }
+        let mut rkey = vec![];
+        // TODO: *definitely* need to index in a non-panicky way
+        rkey.extend_from_slice(&prefix[..entry.prefix_len]);
+        rkey.extend_from_slice(&entry.keysuffix);
+        prefix = rkey.clone();
+
         out.push(Need::Record {
-            rkey: rkey.into_bytes(),
+            rkey: rkey,
             cid: entry.value,
         });
-        // let suffix = entry.keysuffix;
-        // let mut rkey = String::new();
-        // rkey.extend_from_slice(&prefix[..entry.prefix_len]);
-        // rkey.extend_from_slice(&suffix);
-        // if i == 0 {
-        //     prefix.extend_from_slice(&suffix);
-        // }
-        // out.push(Need::Record {
-        //     rkey,
-        //     cid: entry.value,
-        // });
+
         if let Some(child_cid) = entry.tree {
             out.push(Need::Node(child_cid));
         }
