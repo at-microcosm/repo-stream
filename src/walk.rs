@@ -23,7 +23,6 @@ pub enum Step {
 enum Need {
     Node(Cid),
     Record { rkey: Vec<u8>, cid: Cid },
-    ActuallyDone,
 }
 
 fn needs_from_node(node: Node) -> Vec<Need> {
@@ -33,15 +32,17 @@ fn needs_from_node(node: Node) -> Vec<Need> {
     }
     let prefix = if !node.entries.is_empty() {
         String::from_utf8(node.entries[0].keysuffix.to_vec()).unwrap()
-    } else { "".to_string() };
+    } else {
+        "".to_string()
+    };
 
     for entry in &node.entries {
         let pre = &prefix[..entry.prefix_len];
         let suf = String::from_utf8(entry.keysuffix.to_vec()).unwrap();
         let rkey = format!("{pre}{suf}");
-        if !rkey.contains('/') {
-            println!("weird for entries: {:?}", node.entries);
-        }
+        // if !rkey.contains('/') {
+        //     println!("weird for entries: {:?}", node.entries);
+        // }
         out.push(Need::Record {
             rkey: rkey.into_bytes(),
             cid: entry.value,
@@ -66,15 +67,13 @@ fn needs_from_node(node: Node) -> Vec<Need> {
 
 #[derive(Debug)]
 pub struct Walker {
-    current: Need,
     stack: Vec<Need>,
 }
 
 impl Walker {
     pub fn new(tree_root_cid: Cid) -> Self {
         Self {
-            current: Need::Node(tree_root_cid),
-            stack: Vec::new(),
+            stack: vec![Need::Node(tree_root_cid)],
         }
     }
 
@@ -94,7 +93,11 @@ impl Walker {
         // };
         // println!("{: <1$} @{current}", "", self.stack.len() - 1);
         loop {
-            match &mut self.current {
+            let Some(mut current) = self.stack.last() else {
+                log::trace!("tried to walk but we're actually done.");
+                return Ok(Step::Finish);
+            };
+            match &mut current {
                 Need::Node(cid) => {
                     log::trace!("need node {cid:?}");
                     let Some(block) = blocks.remove(cid) else {
@@ -104,17 +107,12 @@ impl Walker {
                     let node = serde_ipld_dagcbor::from_slice::<Node>(&block)
                         .map_err(|e| Trip::BadCommit(e.into()))?;
 
-                    // stash future work so that the right-most work is deepest in the stack
+                    // found node, make sure we pop it from the stack
+                    self.stack.pop();
+
+                    // stash future work so that the right-most work is leftest in the stack
                     for need in needs_from_node(node).into_iter().rev() {
                         self.stack.push(need);
-                    }
-
-                    if let Some(need) = self.stack.pop() {
-                        log::trace!("popped a need from the stack {need:?} depth={}", self.stack.len());
-                        self.current = need;
-                    } else {
-                        log::trace!("no more needs from stack, ig we are done?");
-                        return Ok(Step::Finish);
                     }
                 }
                 Need::Record { rkey, cid } => {
@@ -125,19 +123,12 @@ impl Walker {
                     };
                     let rkey = rkey.to_vec();
                     let data = data.to_vec();
-                    if let Some(next) = self.stack.pop() {
-                        log::trace!("popped current from stack to {next:?}");
-                        self.current = next;
-                    } else {
-                        log::trace!("nothing left on the stack, making us done");
-                        self.current = Need::ActuallyDone;
-                    }
+
+                    // found node, make sure we pop it from the stack
+                    self.stack.pop();
+
                     log::trace!("emitting a block as a step. depth={}", self.stack.len());
                     return Ok(Step::Step { rkey, data });
-                }
-                Need::ActuallyDone => {
-                    log::trace!("tried to walk but we're actually done.");
-                    return Ok(Step::Finish);
                 }
             }
         }
@@ -149,15 +140,51 @@ mod test {
     use super::*;
     use crate::mst::Entry;
 
-    fn cid1() -> Cid { "bafyreihixenvk3ahqbytas4hk4a26w43bh6eo3w6usjqtxkpzsvi655a3m".parse().unwrap() }
-    fn cid2() -> Cid { "QmY7Yh4UquoXHLPFo2XbhXkhBvFoPwmQUSa92pxnxjQuPU".parse().unwrap() }
-    fn cid3() -> Cid { "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi".parse().unwrap() }
-    fn cid4() -> Cid { "QmbWqxBEKC3P8tqsKc98xmWNzrzDtRLMiMPL8wBuTGsMnR".parse().unwrap() }
-    fn cid5() -> Cid { "QmSnuWmxptJZdLJpKRarxBMS2Ju2oANVrgbr2xWbie9b2D".parse().unwrap() }
-    fn cid6() -> Cid { "QmdmQXB2mzChmMeKY47C43LxUdg1NDJ5MWcKMKxDu7RgQm".parse().unwrap() }
-    fn cid7() -> Cid { "bafybeiaysi4s6lnjev27ln5icwm6tueaw2vdykrtjkwiphwekaywqhcjze".parse().unwrap() }
-    fn cid8() -> Cid { "bafyreif3tfdpr5n4jdrbielmcapwvbpcthepfkwq2vwonmlhirbjmotedi".parse().unwrap() }
-    fn cid9() -> Cid { "bafyreicnokmhmrnlp2wjhyk2haep4tqxiptwfrp2rrs7rzq7uk766chqvq".parse().unwrap() }
+    fn cid1() -> Cid {
+        "bafyreihixenvk3ahqbytas4hk4a26w43bh6eo3w6usjqtxkpzsvi655a3m"
+            .parse()
+            .unwrap()
+    }
+    fn cid2() -> Cid {
+        "QmY7Yh4UquoXHLPFo2XbhXkhBvFoPwmQUSa92pxnxjQuPU"
+            .parse()
+            .unwrap()
+    }
+    fn cid3() -> Cid {
+        "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi"
+            .parse()
+            .unwrap()
+    }
+    fn cid4() -> Cid {
+        "QmbWqxBEKC3P8tqsKc98xmWNzrzDtRLMiMPL8wBuTGsMnR"
+            .parse()
+            .unwrap()
+    }
+    fn cid5() -> Cid {
+        "QmSnuWmxptJZdLJpKRarxBMS2Ju2oANVrgbr2xWbie9b2D"
+            .parse()
+            .unwrap()
+    }
+    fn cid6() -> Cid {
+        "QmdmQXB2mzChmMeKY47C43LxUdg1NDJ5MWcKMKxDu7RgQm"
+            .parse()
+            .unwrap()
+    }
+    fn cid7() -> Cid {
+        "bafybeiaysi4s6lnjev27ln5icwm6tueaw2vdykrtjkwiphwekaywqhcjze"
+            .parse()
+            .unwrap()
+    }
+    fn cid8() -> Cid {
+        "bafyreif3tfdpr5n4jdrbielmcapwvbpcthepfkwq2vwonmlhirbjmotedi"
+            .parse()
+            .unwrap()
+    }
+    fn cid9() -> Cid {
+        "bafyreicnokmhmrnlp2wjhyk2haep4tqxiptwfrp2rrs7rzq7uk766chqvq"
+            .parse()
+            .unwrap()
+    }
 
     #[test]
     fn test_needs_from_node_empty() {
@@ -174,30 +201,27 @@ mod test {
             left: Some(cid1()),
             entries: vec![],
         };
-        assert_eq!(needs_from_node(node), vec![
-            Need::Node(cid1()),
-        ]);
+        assert_eq!(needs_from_node(node), vec![Need::Node(cid1()),]);
     }
 
     #[test]
     fn test_needs_from_node_just_one_record() {
         let node = Node {
             left: None,
-            entries: vec![
-                Entry {
-                    keysuffix: "asdf".into(),
-                    prefix_len: 0,
-                    value: cid1(),
-                    tree: None,
-                },
-            ],
+            entries: vec![Entry {
+                keysuffix: "asdf".into(),
+                prefix_len: 0,
+                value: cid1(),
+                tree: None,
+            }],
         };
-        assert_eq!(needs_from_node(node), vec![
-            Need::Record {
+        assert_eq!(
+            needs_from_node(node),
+            vec![Need::Record {
                 rkey: "asdf".into(),
                 cid: cid1(),
-            },
-        ]);
+            },]
+        );
     }
 
     #[test]
@@ -219,60 +243,65 @@ mod test {
                 },
             ],
         };
-        assert_eq!(needs_from_node(node), vec![
-            Need::Record {
-                rkey: "asdf".into(),
-                cid: cid1(),
-            },
-            Need::Record {
-                rkey: "asgh".into(),
-                cid: cid2(),
-            },
-        ]);
+        assert_eq!(
+            needs_from_node(node),
+            vec![
+                Need::Record {
+                    rkey: "asdf".into(),
+                    cid: cid1(),
+                },
+                Need::Record {
+                    rkey: "asgh".into(),
+                    cid: cid2(),
+                },
+            ]
+        );
     }
 
     #[test]
     fn test_needs_from_node_with_both() {
         let node = Node {
             left: None,
-            entries: vec![
-                Entry {
-                    keysuffix: "asdf".into(),
-                    prefix_len: 0,
-                    value: cid1(),
-                    tree: Some(cid2()),
-                },
-            ],
+            entries: vec![Entry {
+                keysuffix: "asdf".into(),
+                prefix_len: 0,
+                value: cid1(),
+                tree: Some(cid2()),
+            }],
         };
-        assert_eq!(needs_from_node(node), vec![
-            Need::Record {
-                rkey: "asdf".into(),
-                cid: cid1(),
-            },
-            Need::Node(cid2()),
-        ]);
+        assert_eq!(
+            needs_from_node(node),
+            vec![
+                Need::Record {
+                    rkey: "asdf".into(),
+                    cid: cid1(),
+                },
+                Need::Node(cid2()),
+            ]
+        );
     }
 
     #[test]
     fn test_needs_from_node_left_and_record() {
         let node = Node {
             left: Some(cid1()),
-            entries: vec![
-                Entry {
-                    keysuffix: "asdf".into(),
-                    prefix_len: 0,
-                    value: cid2(),
-                    tree: None,
-                },
-            ],
+            entries: vec![Entry {
+                keysuffix: "asdf".into(),
+                prefix_len: 0,
+                value: cid2(),
+                tree: None,
+            }],
         };
-        assert_eq!(needs_from_node(node), vec![
-            Need::Node(cid1()),
-            Need::Record {
-                rkey: "asdf".into(),
-                cid: cid2(),
-            },
-        ]);
+        assert_eq!(
+            needs_from_node(node),
+            vec![
+                Need::Node(cid1()),
+                Need::Record {
+                    rkey: "asdf".into(),
+                    cid: cid2(),
+                },
+            ]
+        );
     }
 
     #[test]
@@ -306,29 +335,31 @@ mod test {
                 },
             ],
         };
-        assert_eq!(needs_from_node(node), vec![
-            Need::Node(cid1()),
-            Need::Record {
-                rkey: "asdf".into(),
-                cid: cid2(),
-            },
-            Need::Node(cid3()),
-            Need::Record {
-                rkey: "aghi".into(),
-                cid: cid4(),
-            },
-            Need::Node(cid5()),
-            Need::Record {
-                rkey: "asjkl".into(),
-                cid: cid6(),
-            },
-            Need::Node(cid7()),
-            Need::Record {
-                rkey: "asdfmno".into(),
-                cid: cid8(),
-            },
-            Need::Node(cid9()),
-        ]);
+        assert_eq!(
+            needs_from_node(node),
+            vec![
+                Need::Node(cid1()),
+                Need::Record {
+                    rkey: "asdf".into(),
+                    cid: cid2(),
+                },
+                Need::Node(cid3()),
+                Need::Record {
+                    rkey: "aghi".into(),
+                    cid: cid4(),
+                },
+                Need::Node(cid5()),
+                Need::Record {
+                    rkey: "asjkl".into(),
+                    cid: cid6(),
+                },
+                Need::Node(cid7()),
+                Need::Record {
+                    rkey: "asdfmno".into(),
+                    cid: cid8(),
+                },
+                Need::Node(cid9()),
+            ]
+        );
     }
-
 }
