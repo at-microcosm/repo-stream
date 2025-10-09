@@ -10,6 +10,8 @@ pub enum Trip {
     NodeEmpty,
     #[error("Failed to decode commit block: {0}")]
     BadCommit(Box<dyn std::error::Error>),
+    #[error("Failed to compute an rkey due to invalid prefix_len")]
+    EntryPrefixOutOfbounds,
 }
 
 #[derive(Debug)]
@@ -25,7 +27,7 @@ enum Need {
     Record { rkey: Vec<u8>, cid: Cid },
 }
 
-fn needs_from_node(node: Node) -> Vec<Need> {
+fn needs_from_node(node: Node) -> Result<Vec<Need>, Trip> {
     let mut out = vec![];
     if let Some(left_cid) = node.left {
         out.push(Need::Node(left_cid));
@@ -35,12 +37,15 @@ fn needs_from_node(node: Node) -> Vec<Need> {
     for entry in &node.entries {
         let mut rkey = vec![];
         // TODO: *definitely* need to index in a non-panicky way
-        rkey.extend_from_slice(&prefix[..entry.prefix_len]);
+        let pre_checked = prefix
+            .get(..entry.prefix_len)
+            .ok_or(Trip::EntryPrefixOutOfbounds)?;
+        rkey.extend_from_slice(pre_checked);
         rkey.extend_from_slice(&entry.keysuffix);
         prefix = rkey.clone();
 
         out.push(Need::Record {
-            rkey: rkey,
+            rkey,
             cid: entry.value,
         });
 
@@ -48,7 +53,7 @@ fn needs_from_node(node: Node) -> Vec<Need> {
             out.push(Need::Node(child_cid));
         }
     }
-    out
+    Ok(out)
 }
 
 #[derive(Debug)]
@@ -97,7 +102,7 @@ impl Walker {
                     self.stack.pop();
 
                     // stash future work so that the right-most work is leftest in the stack
-                    for need in needs_from_node(node).into_iter().rev() {
+                    for need in needs_from_node(node)?.into_iter().rev() {
                         self.stack.push(need);
                     }
                 }
@@ -178,7 +183,7 @@ mod test {
             left: None,
             entries: vec![],
         };
-        assert_eq!(needs_from_node(node), vec![]);
+        assert_eq!(needs_from_node(node).unwrap(), vec![]);
     }
 
     #[test]
@@ -187,7 +192,7 @@ mod test {
             left: Some(cid1()),
             entries: vec![],
         };
-        assert_eq!(needs_from_node(node), vec![Need::Node(cid1()),]);
+        assert_eq!(needs_from_node(node).unwrap(), vec![Need::Node(cid1()),]);
     }
 
     #[test]
@@ -202,7 +207,7 @@ mod test {
             }],
         };
         assert_eq!(
-            needs_from_node(node),
+            needs_from_node(node).unwrap(),
             vec![Need::Record {
                 rkey: "asdf".into(),
                 cid: cid1(),
@@ -230,7 +235,7 @@ mod test {
             ],
         };
         assert_eq!(
-            needs_from_node(node),
+            needs_from_node(node).unwrap(),
             vec![
                 Need::Record {
                     rkey: "asdf".into(),
@@ -256,7 +261,7 @@ mod test {
             }],
         };
         assert_eq!(
-            needs_from_node(node),
+            needs_from_node(node).unwrap(),
             vec![
                 Need::Record {
                     rkey: "asdf".into(),
@@ -279,7 +284,7 @@ mod test {
             }],
         };
         assert_eq!(
-            needs_from_node(node),
+            needs_from_node(node).unwrap(),
             vec![
                 Need::Node(cid1()),
                 Need::Record {
@@ -322,7 +327,7 @@ mod test {
             ],
         };
         assert_eq!(
-            needs_from_node(node),
+            needs_from_node(node).unwrap(),
             vec![
                 Need::Node(cid1()),
                 Need::Record {
@@ -336,12 +341,12 @@ mod test {
                 },
                 Need::Node(cid5()),
                 Need::Record {
-                    rkey: "asjkl".into(),
+                    rkey: "agjkl".into(),
                     cid: cid6(),
                 },
                 Need::Node(cid7()),
                 Need::Record {
-                    rkey: "asdfmno".into(),
+                    rkey: "agjkmno".into(),
                     cid: cid8(),
                 },
                 Need::Node(cid9()),
