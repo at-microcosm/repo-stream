@@ -1,6 +1,17 @@
 # repo-stream
 
-an AsyncRead for atproto MSTs in CAR files
+a futures atproto record stream from CAR file
+
+current notes
+
+- just buffering all the blocks is 2.5x faster than interleaving optimistic walking
+  - at least, this is true on huge CARs with the current (stream-unfriendly) pds export behaviour
+
+- transform function is a little tricky because we can't *know* if a block is a record or a node until we actually walk the tree to it (after they're all buffered in memory anyway).
+  - still might as well benchmark a test with optimistic block probing+transform on the way in
+
+
+original ideas:
 
 - tries to walk and emit the MST *while streaming in the CAR*
 - drops intermediate mst blocks after reading to reduce total memory
