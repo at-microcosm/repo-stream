@@ -646,6 +646,7 @@ dependencies = [
  "ipld-core",
  "iroh-car",
  "log",
+ "multibase",
  "serde",
  "serde_bytes",
  "serde_ipld_dagcbor",

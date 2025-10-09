@@ -37,7 +37,7 @@ pub struct Commit {
 }
 
 /// MST node data schema
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Node {
     /// link to sub-tree Node on a lower level and with all keys sorting before
@@ -68,7 +68,7 @@ impl Node {
 }
 
 /// TreeEntry object
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Entry {
     /// count of bytes shared with previous TreeEntry in this Node (if any)
