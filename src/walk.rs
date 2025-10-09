@@ -12,19 +12,21 @@ pub enum Trip {
     BadCommit(Box<dyn std::error::Error>),
     #[error("Failed to compute an rkey due to invalid prefix_len")]
     EntryPrefixOutOfbounds,
+    #[error("RKey was not utf-8")]
+    EntryRkeyNotUtf8(#[from] std::string::FromUtf8Error),
 }
 
 #[derive(Debug)]
 pub enum Step {
     Rest,
     Finish,
-    Step { rkey: Vec<u8>, data: Vec<u8> },
+    Step { rkey: String, data: Vec<u8> },
 }
 
 #[derive(Debug, PartialEq)]
 enum Need {
     Node(Cid),
-    Record { rkey: Vec<u8>, cid: Cid },
+    Record { rkey: String, cid: Cid },
 }
 
 fn needs_from_node(node: Node) -> Result<Vec<Need>, Trip> {
@@ -43,6 +45,8 @@ fn needs_from_node(node: Node) -> Result<Vec<Need>, Trip> {
         rkey.extend_from_slice(pre_checked);
         rkey.extend_from_slice(&entry.keysuffix);
         prefix = rkey.clone();
+
+        let rkey = String::from_utf8(rkey)?;
 
         out.push(Need::Record {
             rkey,
@@ -112,7 +116,7 @@ impl Walker {
                         log::trace!("record block not found, resting");
                         return Ok(Step::Rest);
                     };
-                    let rkey = rkey.to_vec();
+                    let rkey = rkey.clone();
                     let data = data.to_vec();
 
                     // found node, make sure we pop it from the stack

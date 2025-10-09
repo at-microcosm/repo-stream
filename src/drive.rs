@@ -24,8 +24,6 @@ pub enum DriveError {
     Tripped(#[from] Trip),
     #[error("Not finished walking, but no more blocks are available to continue")]
     Dnf,
-    #[error("Record Rkey was invalid (not utf-8)")]
-    BadRkey,
 }
 
 type CarBlock<E> = Result<(Cid, Vec<u8>), E>;
@@ -113,7 +111,6 @@ async fn drive_ahead<E: Error + 'static, S: Stream<Item = CarBlock<E>> + Unpin>(
                 return Ok(None);
             }
             Step::Step { rkey, data } => {
-                let rkey = String::from_utf8(rkey).map_err(|_| DriveError::BadRkey)?;
                 return Ok(Some((Rkey(rkey), data)));
             }
         }
