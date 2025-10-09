@@ -86,25 +86,39 @@ impl<E: Error + 'static, S: Stream<Item = CarBlock<E>> + Unpin> Vehicle<E, S> {
 async fn drive_ahead<E: Error + 'static, S: Stream<Item = CarBlock<E>> + Unpin>(
     vehicle: &mut Vehicle<E, S>,
 ) -> Result<Option<(Rkey, Vec<u8>)>, DriveError> {
-    loop {
-        if vehicle.walked_out {
-            // stopped at a rest, try to load more blocks first
-            let Some((cid, data)) = vehicle
-                .block_stream
-                .try_next()
-                .await
-                .map_err(|e| DriveError::CarBlockError(e.into()))?
-            else {
-                return Err(DriveError::Dnf);
-            };
+    // trying smth: load all blocks first
+    if !vehicle.walked_out {
+        // stopped at a rest, try to load more blocks first
+        while let Some((cid, data)) = vehicle
+            .block_stream
+            .try_next()
+            .await
+            .map_err(|e| DriveError::CarBlockError(e.into()))? {
             vehicle.blocks.insert(cid, data);
-            vehicle.walked_out = false;
-        }
+        };
+        vehicle.walked_out = true;
+    }
+    loop {
+        // if vehicle.walked_out {
+        //     // stopped at a rest, try to load more blocks first
+        //     let Some((cid, data)) = vehicle
+        //         .block_stream
+        //         .try_next()
+        //         .await
+        //         .map_err(|e| DriveError::CarBlockError(e.into()))?
+        //     else {
+        //         return Err(DriveError::Dnf);
+        //     };
+        //     vehicle.blocks.insert(cid, data);
+        //     vehicle.walked_out = false;
+        // }
+
         // walk as far as we can until we run out of blocks or find a record
         match vehicle.walker.walk(&mut vehicle.blocks)? {
             Step::Rest => {
                 log::trace!("walker is resting, get another block");
-                vehicle.walked_out = true;
+                panic!("we should have had all blocks already");
+                // vehicle.walked_out = true;
             }
             Step::Finish => {
                 log::trace!("walker finished");

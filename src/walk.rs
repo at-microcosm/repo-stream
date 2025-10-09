@@ -133,15 +133,6 @@ enum Need {
     Record { rkey: String, cid: Cid },
 }
 
-// impl Need {
-//     fn cid(&self) -> &Cid {
-//         match self {
-//             Need::Node(cid) => cid,
-//             Need::Record { cid, .. } => cid,
-//         }
-//     }
-// }
-
 impl From<&Node> for ActionNode {
     fn from(node: &Node) -> Self {
         let left_tree = node.left.as_ref().map(Into::into);
@@ -182,16 +173,6 @@ impl Walker {
     }
 
     pub fn walk(&mut self, blocks: &mut HashMap<Cid, Vec<u8>>) -> Result<Step, Trip> {
-        // //// debug
-        // for (i, need) in self.stack.iter().enumerate() {
-        //     let k = if let Need::Record { rkey, .. } = need {
-        //         rkey
-        //     } else {
-        //         "[??]"
-        //     };
-        //     println!("{: <1$} {k}", "", i)
-        // }
-
         loop {
             let Some(current_node) = self.stack.last_mut() else {
                 log::trace!("tried to walk but we're actually done.");
@@ -238,16 +219,16 @@ impl Walker {
     }
 }
 
-// #[cfg(test)]
-// mod test {
-//     use super::*;
-//     use crate::mst::Entry;
+#[cfg(test)]
+mod test {
+    use super::*;
+    // use crate::mst::Entry;
 
-//     fn cid1() -> Cid {
-//         "bafyreihixenvk3ahqbytas4hk4a26w43bh6eo3w6usjqtxkpzsvi655a3m"
-//             .parse()
-//             .unwrap()
-//     }
+    fn cid1() -> Cid {
+        "bafyreihixenvk3ahqbytas4hk4a26w43bh6eo3w6usjqtxkpzsvi655a3m"
+            .parse()
+            .unwrap()
+    }
 //     fn cid2() -> Cid {
 //         "QmY7Yh4UquoXHLPFo2XbhXkhBvFoPwmQUSa92pxnxjQuPU"
 //             .parse()
@@ -289,23 +270,25 @@ impl Walker {
 //             .unwrap()
 //     }
 
-//     #[test]
-//     fn test_needs_from_node_empty() {
-//         let node = Node {
-//             left: None,
-//             entries: vec![],
-//         };
-//         assert_eq!(needs_from_node(node).unwrap(), vec![]);
-//     }
+    #[test]
+    fn test_next_from_node_empty() {
+        let node = Node {
+            left: None,
+            entries: vec![],
+        };
+        let action_node: ActionNode = (&node).into();
+        assert_eq!(action_node.next(), None);
+    }
 
-//     #[test]
-//     fn test_needs_from_node_just_left() {
-//         let node = Node {
-//             left: Some(cid1()),
-//             entries: vec![],
-//         };
-//         assert_eq!(needs_from_node(node).unwrap(), vec![Need::Node(cid1()),]);
-//     }
+    #[test]
+    fn test_needs_from_node_just_left() {
+        let node = Node {
+            left: Some(cid1()),
+            entries: vec![],
+        };
+        let action_node: ActionNode = (&node).into();
+        assert_eq!(action_node.next(), Some(Need::Node(cid1())));
+    }
 
 //     #[test]
 //     fn test_needs_from_node_just_one_record() {
@@ -465,4 +448,4 @@ impl Walker {
 //             ]
 //         );
 //     }
-// }
+}
