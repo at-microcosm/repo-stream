@@ -60,15 +60,20 @@ pub enum MaybeProcessedBlock<T> {
     Processed(Result<T, Box<dyn Error>>),
 }
 
-pub struct Vehicle<E, S: Stream<Item = CarBlock<E>>> {
+pub struct Vehicle<E, S: Stream<Item = CarBlock<E>>, T> {
     block_stream: S,
-    blocks: HashMap<Cid, MaybeProcessedBlock<usize>>,
+    blocks: HashMap<Cid, MaybeProcessedBlock<T>>,
     walker: Walker,
     walked_out: bool,
+    process: fn(&[u8]) -> Result<T, Box<dyn Error>>,
 }
 
-impl<E: Error + 'static, S: Stream<Item = CarBlock<E>> + Unpin> Vehicle<E, S> {
-    pub async fn init(root: &Cid, mut block_stream: S) -> Result<(Commit, Self), DriveError> {
+impl<E: Error + 'static, S: Stream<Item = CarBlock<E>> + Unpin, T: Clone> Vehicle<E, S, T> {
+    pub async fn init(
+        root: &Cid,
+        mut block_stream: S,
+        process: fn(&[u8]) -> Result<T, Box<dyn Error>>,
+    ) -> Result<(Commit, Self), DriveError> {
         let mut blocks = HashMap::new();
 
         let mut commit = None;
@@ -98,15 +103,16 @@ impl<E: Error + 'static, S: Stream<Item = CarBlock<E>> + Unpin> Vehicle<E, S> {
             blocks,
             walker,
             walked_out: false,
+            process,
         };
         Ok((commit, me))
     }
 
-    pub async fn next_record(&mut self) -> Result<Option<(Rkey, usize)>, DriveError> {
+    pub async fn next_record(&mut self) -> Result<Option<(Rkey, T)>, DriveError> {
         drive_ahead(self).await
     }
 
-    pub fn stream(self) -> impl Stream<Item = Result<(Rkey, usize), DriveError>> {
+    pub fn stream(self) -> impl Stream<Item = Result<(Rkey, T), DriveError>> {
         futures::stream::try_unfold(self, |mut this| async move {
             let maybe_record = drive_ahead(&mut this).await?;
             Ok(maybe_record.map(|b| (b, this)))
@@ -114,9 +120,9 @@ impl<E: Error + 'static, S: Stream<Item = CarBlock<E>> + Unpin> Vehicle<E, S> {
     }
 }
 
-async fn drive_ahead<E: Error + 'static, S: Stream<Item = CarBlock<E>> + Unpin>(
-    vehicle: &mut Vehicle<E, S>,
-) -> Result<Option<(Rkey, usize)>, DriveError> {
+async fn drive_ahead<E: Error + 'static, S: Stream<Item = CarBlock<E>> + Unpin, T: Clone>(
+    vehicle: &mut Vehicle<E, S, T>,
+) -> Result<Option<(Rkey, T)>, DriveError> {
     // trying smth: load all blocks first
     if !vehicle.walked_out {
         // stopped at a rest, try to load more blocks first
@@ -129,7 +135,7 @@ async fn drive_ahead<E: Error + 'static, S: Stream<Item = CarBlock<E>> + Unpin>(
             let val = if Node::could_be(&data) {
                 MaybeProcessedBlock::Raw(data)
             } else {
-                MaybeProcessedBlock::Processed(Ok(data.len()))
+                MaybeProcessedBlock::Processed((vehicle.process)(&data))
             };
             vehicle.blocks.insert(cid, val);
         };
@@ -140,7 +146,7 @@ async fn drive_ahead<E: Error + 'static, S: Stream<Item = CarBlock<E>> + Unpin>(
     loop {
 
         // walk as far as we can until we run out of blocks or find a record
-        match vehicle.walker.walk(&mut vehicle.blocks)? {
+        match vehicle.walker.walk(&mut vehicle.blocks, vehicle.process)? {
             Step::Rest => {
                 log::trace!("walker is resting, get another block");
                 panic!("we should have had all blocks already");

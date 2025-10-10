@@ -18,6 +18,8 @@ pub enum Trip {
     EntryPrefixOutOfbounds,
     #[error("RKey was not utf-8")]
     EntryRkeyNotUtf8(#[from] std::string::FromUtf8Error),
+    #[error("Process failed: {0}")]
+    ProcessFailed(Box<dyn std::error::Error>),
 }
 
 #[derive(Debug)]
@@ -175,7 +177,11 @@ impl Walker {
         }
     }
 
-    pub fn walk(&mut self, blocks: &mut HashMap<Cid, MaybeProcessedBlock<usize>>) -> Result<Step<usize>, Trip> {
+    pub fn walk<T: Clone>(
+        &mut self,
+        blocks: &mut HashMap<Cid, MaybeProcessedBlock<T>>,
+        process: fn(&[u8]) -> Result<T, Box<dyn std::error::Error>>,
+    ) -> Result<Step<T>, Trip> {
         loop {
             let Some(current_node) = self.stack.last_mut() else {
                 log::trace!("tried to walk but we're actually done.");
@@ -214,16 +220,17 @@ impl Walker {
                     };
                     let rkey = rkey.clone();
                     let data = match data {
-                        MaybeProcessedBlock::Raw(data) => data.len(),
-                        MaybeProcessedBlock::Processed(Ok(t)) => *t,
-                        MaybeProcessedBlock::Processed(e) =>
-                            return Err(Trip::RecordFailedProcessing(format!("booo: {e:?}").into())), // TODO
+                        MaybeProcessedBlock::Raw(data) => process(&data),
+                        MaybeProcessedBlock::Processed(Ok(t)) => Ok(t.clone()),
+                        MaybeProcessedBlock::Processed(_e) =>
+                            return Err(Trip::RecordFailedProcessing("booo".into())), // TODO
                     };
 
                     // found node, make sure we remember
                     current_node.found(cid);
 
                     log::trace!("emitting a block as a step. depth={}", self.stack.len());
+                    let data = data.map_err(Trip::ProcessFailed)?;
                     return Ok(Step::Step { rkey, data });
                 }
             }

@@ -35,13 +35,17 @@ async fn main() -> Result<()> {
     // let stream = Box::pin(reader.stream());
     let stream = std::pin::pin!(reader.stream());
 
-    let (commit, v) = repo_stream::drive::Vehicle::init(&root, stream).await?;
+    let (commit, v) = repo_stream::drive::Vehicle::init(
+        &root,
+        stream,
+        |block| Ok(block.len()),
+    ).await?;
     let mut record_stream = std::pin::pin!(v.stream());
 
     log::info!("got commit: {commit:?}");
 
     while let Some((rkey, rec)) = record_stream.try_next().await? {
-        log::info!("got {rkey:?} {rec:?}");
+        log::info!("got {rkey:?}");
     }
     log::info!("bye!");
 
