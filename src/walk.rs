@@ -12,8 +12,6 @@ pub enum Trip<E: Error> {
     NodeEmpty,
     #[error("Failed to decode commit block: {0}")]
     BadCommit(Box<dyn std::error::Error>),
-    #[error("Failed to process record: {0}")]
-    RecordFailedProcessing(Box<dyn Error>),
     #[error("Action node error: {0}")]
     ActionNode(#[from] ActionNodeError),
     #[error("Process failed: {0}")]

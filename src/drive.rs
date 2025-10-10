@@ -10,22 +10,18 @@ use crate::walk::{Step, Trip, Walker};
 pub enum DriveError<E: Error> {
     #[error("Failed to initialize CarReader: {0}")]
     CarReader(#[from] iroh_car::Error),
-    #[error("CAR file requires a root to be present")]
-    MissingRoot,
     #[error("Car block stream error: {0}")]
     CarBlockError(Box<dyn Error>),
     #[error("Failed to decode commit block: {0}")]
     BadCommit(Box<dyn Error>),
-    #[error("Failed to decode record block: {0}")]
-    BadRecord(Box<dyn Error>),
     #[error("The Commit block reference by the root was not found")]
     MissingCommit,
     #[error("The MST block {0} could not be found")]
     MissingBlock(Cid),
     #[error("Failed to walk the mst tree: {0}")]
     Tripped(#[from] Trip<E>),
-    #[error("Not finished walking, but no more blocks are available to continue")]
-    Dnf,
+    #[error("Encountered an rkey out of order while walking the MST")]
+    RkeyOutOfOrder,
 }
 
 type CarBlock<E> = Result<(Cid, Vec<u8>), E>;
@@ -75,6 +71,7 @@ where
     blocks: HashMap<Cid, MaybeProcessedBlock<T, PE>>,
     walker: Walker,
     process: P,
+    prev_rkey: String,
 }
 
 impl<SE, S, T: Clone, P, PE> Vehicle<SE, S, T, P, PE>
@@ -102,7 +99,7 @@ where
                 let c: Commit = serde_ipld_dagcbor::from_slice(&data)
                     .map_err(|e| DriveError::BadCommit(e.into()))?;
                 commit = Some(c);
-                break; // inner while
+                break;
             } else {
                 blocks.insert(
                     cid,
@@ -125,6 +122,7 @@ where
             blocks,
             walker,
             process,
+            prev_rkey: "".to_string(),
         };
         Ok((commit, me))
     }
@@ -159,7 +157,12 @@ where
             let cid_needed = match self.walker.walk(&mut self.blocks, &self.process)? {
                 Step::Rest(cid) => cid,
                 Step::Finish => return Ok(None),
-                Step::Step { rkey, data } => return Ok(Some((Rkey(rkey), data))),
+                Step::Step { rkey, data } => {
+                    if rkey <= self.prev_rkey {
+                        return Err(DriveError::RkeyOutOfOrder);
+                    }
+                    return Ok(Some((Rkey(rkey), data)));
+                }
             };
 
             // load blocks until we reach that cid
