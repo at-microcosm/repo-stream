@@ -64,3 +64,10 @@ future work:
   - either just generally to handle huge CARs, or as a fallback when streaming fails
 
 redb has an in-memory backend, so it would be possible to *always* use it for block caching. user can choose if they want to allow disk or just do memory, and then "spilling" from the cache to disk would be mostly free?
+
+
+## license
+
+This work is dual-licensed under MIT and Apache 2.0. You can choose between one of them if you use this work.
+
+`SPDX-License-Identifier: MIT OR Apache-2.0`
