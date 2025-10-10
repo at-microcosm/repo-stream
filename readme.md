@@ -3,9 +3,26 @@
 Fast and (aspirationally) robust atproto CAR file processing in rust
 
 
+current car processing times (records processed into their length usize, phil's dev machine):
+
+- 128MiB CAR file: `347ms`
+- 5.0MiB: `6.1ms`
+- 279KiB: `139us`
+- 3.4KiB: `4.9us`
+
+
+running the huge-car benchmark
+
+- to avoid committing it to the repo, you have to pass it in through the env for now.
+
+  ```bash
+  HUGE_CAR=~/Downloads/did_plc_redacted.car cargo bench -- huge-car
+  ```
+
+
 todo
 
-- [ ] car file test fixtures & validation tests
+- [x] car file test fixtures & validation tests
 - [ ] make sure we can get the did and signature out for verification
 - [ ] spec compliance todos
   - [ ] assert that keys are ordered and fail if not
@@ -13,7 +30,7 @@ todo
 - [ ] performance todos
   - [ ] consume the serialized nodes into a mutable efficient format
     - [ ] maybe customize the deserialize impl to do that directly?
-  - [ ] benchmark and profile
+  - [x] benchmark and profile
 - [ ] robustness todos
   - [ ] swap the blocks hashmap for a BlockStore trait that can be dumped to redb
     - [ ] maybe keep the redb function behind a feature flag?

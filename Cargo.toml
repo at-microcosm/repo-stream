@@ -30,3 +30,7 @@ debug = true
 [[bench]]
 name = "non-huge-cars"
 harness = false
+
+[[bench]]
+name = "huge-car"
+harness = false
