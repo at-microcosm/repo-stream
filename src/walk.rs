@@ -1,5 +1,6 @@
 //! Depth-first MST traversal
 
+use std::error::Error;
 use crate::mst::Node;
 use crate::drive::{MaybeProcessedBlock, ProcRes};
 use ipld_core::cid::Cid;
@@ -7,19 +8,25 @@ use std::collections::HashMap;
 use std::fmt;
 
 #[derive(Debug, thiserror::Error)]
-pub enum Trip {
+pub enum Trip<E: Error> {
     #[error("empty mst nodes are not allowed")]
     NodeEmpty,
     #[error("Failed to decode commit block: {0}")]
     BadCommit(Box<dyn std::error::Error>),
     #[error("Failed to process record: {0}")]
-    RecordFailedProcessing(Box<dyn std::error::Error>),
-    #[error("Failed to compute an rkey due to invalid prefix_len")]
-    EntryPrefixOutOfbounds,
+    RecordFailedProcessing(Box<dyn Error>),
+    #[error("Action node error: {0}")]
+    ActionNode(#[from] ActionNodeError),
     #[error("RKey was not utf-8")]
     EntryRkeyNotUtf8(#[from] std::string::FromUtf8Error),
     #[error("Process failed: {0}")]
-    ProcessFailed(Box<dyn std::error::Error>),
+    ProcessFailed(E),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ActionNodeError {
+    #[error("Failed to compute an rkey due to invalid prefix_len")]
+    EntryPrefixOutOfbounds,
 }
 
 #[derive(Debug)]
@@ -148,7 +155,7 @@ impl From<&Node> for ActionNode {
             let mut rkey = vec![];
             let pre_checked = prefix
                 .get(..entry.prefix_len)
-                .ok_or(Trip::EntryPrefixOutOfbounds)
+                .ok_or(ActionNodeError::EntryPrefixOutOfbounds)
                 .unwrap(); // TODO has to be try_from
             rkey.extend_from_slice(pre_checked);
             rkey.extend_from_slice(&entry.keysuffix);
@@ -177,11 +184,11 @@ impl Walker {
         }
     }
 
-    pub fn walk<T: Clone>(
+    pub fn walk<T: Clone, E: Error>(
         &mut self,
-        blocks: &mut HashMap<Cid, MaybeProcessedBlock<T>>,
-        process: impl Fn(&[u8]) -> ProcRes<T>,
-    ) -> Result<Step<T>, Trip> {
+        blocks: &mut HashMap<Cid, MaybeProcessedBlock<T, E>>,
+        process: impl Fn(&[u8]) -> ProcRes<T, E>,
+    ) -> Result<Step<T>, Trip<E>> {
         loop {
             let Some(current_node) = self.stack.last_mut() else {
                 log::trace!("tried to walk but we're actually done.");

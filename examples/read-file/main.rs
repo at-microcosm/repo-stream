@@ -1,4 +1,5 @@
 extern crate repo_stream;
+use std::convert::Infallible;
 use clap::Parser;
 use futures::TryStreamExt;
 use iroh_car::CarReader;
@@ -38,7 +39,7 @@ async fn main() -> Result<()> {
     let (commit, v) = repo_stream::drive::Vehicle::init(
         root,
         stream,
-        |block| Ok(block.len()),
+        |block| Ok::<_, Infallible>(block.len()),
     ).await?;
     let mut record_stream = std::pin::pin!(v.stream());
 

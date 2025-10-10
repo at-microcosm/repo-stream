@@ -7,7 +7,7 @@ use crate::mst::{Commit, Node};
 use crate::walk::{Step, Trip, Walker};
 
 #[derive(Debug, thiserror::Error)]
-pub enum DriveError {
+pub enum DriveError<E: Error> {
     #[error("Failed to initialize CarReader: {0}")]
     CarReader(#[from] iroh_car::Error),
     #[error("CAR file requires a root to be present")]
@@ -23,7 +23,7 @@ pub enum DriveError {
     #[error("The MST block {0} could not be found")]
     MissingBlock(Cid),
     #[error("Failed to walk the mst tree: {0}")]
-    Tripped(#[from] Trip),
+    Tripped(#[from] Trip<E>),
     #[error("Not finished walking, but no more blocks are available to continue")]
     Dnf,
 }
@@ -34,7 +34,7 @@ type CarBlock<E> = Result<(Cid, Vec<u8>), E>;
 pub struct Rkey(pub String);
 
 #[derive(Debug)]
-pub enum MaybeProcessedBlock<T> {
+pub enum MaybeProcessedBlock<T, E> {
     /// A block that's *probably* a Node (but we can't know yet)
     ///
     /// It *can be* a record that suspiciously looks a lot like a node, so we
@@ -59,34 +59,36 @@ pub enum MaybeProcessedBlock<T> {
     /// There's an alternative here, which would be to kick unprocessable blocks
     /// back to Raw, or maybe even a new RawUnprocessable variant. Then we could
     /// surface the typed error later if needed by trying to reprocess.
-    Processed(Result<T, Box<dyn Error>>),
+    Processed(Result<T, E>),
 }
 
 // TODO: generic error not box dyn nonsense.
-pub type ProcRes<T> = Result<T, Box<dyn Error>>;
+pub type ProcRes<T, E> = Result<T, E>;
 
-pub struct Vehicle<SE, S, T, P>
+pub struct Vehicle<SE, S, T, P, PE>
 where
     S: Stream<Item = CarBlock<SE>>,
-    P: Fn(&[u8]) -> ProcRes<T>,
+    P: Fn(&[u8]) -> ProcRes<T, PE>,
+    PE: Error,
 {
     block_stream: S,
-    blocks: HashMap<Cid, MaybeProcessedBlock<T>>,
+    blocks: HashMap<Cid, MaybeProcessedBlock<T, PE>>,
     walker: Walker,
     process: P,
 }
 
-impl<SE, S, T: Clone, P> Vehicle<SE, S, T, P>
+impl<SE, S, T: Clone, P, PE> Vehicle<SE, S, T, P, PE>
 where
     SE: Error + 'static,
     S: Stream<Item = CarBlock<SE>> + Unpin,
-    P: Fn(&[u8]) -> ProcRes<T>,
+    P: Fn(&[u8]) -> ProcRes<T, PE>,
+    PE: Error,
 {
     pub async fn init(
         root: Cid,
         mut block_stream: S,
         process: P,
-    ) -> Result<(Commit, Self), DriveError> {
+    ) -> Result<(Commit, Self), DriveError<PE>> {
         let mut blocks = HashMap::new();
 
         let mut commit = None;
@@ -124,7 +126,7 @@ where
         Ok((commit, me))
     }
 
-    async fn drive_until(&mut self, cid_needed: Cid) -> Result<(), DriveError> {
+    async fn drive_until(&mut self, cid_needed: Cid) -> Result<(), DriveError<PE>> {
         while let Some((cid, data)) = self
             .block_stream
             .try_next()
@@ -145,7 +147,7 @@ where
         return Err(DriveError::MissingBlock(cid_needed));
     }
 
-    pub async fn next_record(&mut self) -> Result<Option<(Rkey, T)>, DriveError> {
+    pub async fn next_record(&mut self) -> Result<Option<(Rkey, T)>, DriveError<PE>> {
         loop {
             // walk as far as we can until we run out of blocks or find a record
             let cid_needed = match self.walker.walk(&mut self.blocks, &self.process)? {
@@ -159,7 +161,7 @@ where
         }
     }
 
-    pub fn stream(self) -> impl Stream<Item = Result<(Rkey, T), DriveError>> {
+    pub fn stream(self) -> impl Stream<Item = Result<(Rkey, T), DriveError<PE>>> {
         futures::stream::try_unfold(self, |mut this| async move {
             let maybe_record = this.next_record().await?;
             Ok(maybe_record.map(|b| (b, this)))
