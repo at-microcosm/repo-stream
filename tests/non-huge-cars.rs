@@ -7,7 +7,6 @@ const TINY_CAR: &'static [u8] = include_bytes!("../car-samples/tiny.car");
 const LITTLE_CAR: &'static [u8] = include_bytes!("../car-samples/little.car");
 const MIDSIZE_CAR: &'static [u8] = include_bytes!("../car-samples/midsize.car");
 
-
 async fn test_car(bytes: &[u8], expected_records: usize, expected_sum: usize) {
     let reader = CarReader::new(bytes).await.unwrap();
 
@@ -15,7 +14,8 @@ async fn test_car(bytes: &[u8], expected_records: usize, expected_sum: usize) {
         .header()
         .roots()
         .first()
-        .ok_or("missing root").unwrap()
+        .ok_or("missing root")
+        .unwrap()
         .clone();
 
     let stream = std::pin::pin!(reader.stream());
