@@ -104,11 +104,14 @@ where
                 commit = Some(c);
                 break; // inner while
             } else {
-                blocks.insert(cid, if Node::could_be(&data) {
-                    MaybeProcessedBlock::Raw(data)
-                } else {
-                    MaybeProcessedBlock::Processed(process(&data))
-                });
+                blocks.insert(
+                    cid,
+                    if Node::could_be(&data) {
+                        MaybeProcessedBlock::Raw(data)
+                    } else {
+                        MaybeProcessedBlock::Processed(process(&data))
+                    },
+                );
             }
         }
 
@@ -133,18 +136,21 @@ where
             .await
             .map_err(|e| DriveError::CarBlockError(e.into()))?
         {
-            self.blocks.insert(cid, if Node::could_be(&data) {
-                MaybeProcessedBlock::Raw(data)
-            } else {
-                MaybeProcessedBlock::Processed((self.process)(&data))
-            });
+            self.blocks.insert(
+                cid,
+                if Node::could_be(&data) {
+                    MaybeProcessedBlock::Raw(data)
+                } else {
+                    MaybeProcessedBlock::Processed((self.process)(&data))
+                },
+            );
             if cid == cid_needed {
                 return Ok(());
             }
-        };
+        }
 
         // if we never found the block
-        return Err(DriveError::MissingBlock(cid_needed));
+        Err(DriveError::MissingBlock(cid_needed))
     }
 
     pub async fn next_record(&mut self) -> Result<Option<(Rkey, T)>, DriveError<PE>> {

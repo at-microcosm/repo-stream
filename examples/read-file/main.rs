@@ -1,8 +1,8 @@
 extern crate repo_stream;
-use std::convert::Infallible;
 use clap::Parser;
 use futures::TryStreamExt;
 use iroh_car::CarReader;
+use std::convert::Infallible;
 use std::path::PathBuf;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -36,11 +36,9 @@ async fn main() -> Result<()> {
     // let stream = Box::pin(reader.stream());
     let stream = std::pin::pin!(reader.stream());
 
-    let (commit, v) = repo_stream::drive::Vehicle::init(
-        root,
-        stream,
-        |block| Ok::<_, Infallible>(block.len()),
-    ).await?;
+    let (commit, v) =
+        repo_stream::drive::Vehicle::init(root, stream, |block| Ok::<_, Infallible>(block.len()))
+            .await?;
     let mut record_stream = std::pin::pin!(v.stream());
 
     log::info!("got commit: {commit:?}");

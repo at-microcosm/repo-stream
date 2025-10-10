@@ -1,10 +1,10 @@
 //! Depth-first MST traversal
 
-use std::error::Error;
-use crate::mst::Node;
 use crate::drive::{MaybeProcessedBlock, ProcRes};
+use crate::mst::Node;
 use ipld_core::cid::Cid;
 use std::collections::HashMap;
+use std::error::Error;
 use std::fmt;
 
 #[derive(Debug, thiserror::Error)]
@@ -227,10 +227,11 @@ impl Walker {
                     };
                     let rkey = rkey.clone();
                     let data = match data {
-                        MaybeProcessedBlock::Raw(data) => process(&data),
+                        MaybeProcessedBlock::Raw(data) => process(data),
                         MaybeProcessedBlock::Processed(Ok(t)) => Ok(t.clone()),
-                        MaybeProcessedBlock::Processed(_e) =>
-                            return Err(Trip::RecordFailedProcessing("booo".into())), // TODO
+                        MaybeProcessedBlock::Processed(_e) => {
+                            return Err(Trip::RecordFailedProcessing("booo".into()));
+                        } // TODO
                     };
 
                     // found node, make sure we remember
@@ -255,46 +256,46 @@ mod test {
             .parse()
             .unwrap()
     }
-//     fn cid2() -> Cid {
-//         "QmY7Yh4UquoXHLPFo2XbhXkhBvFoPwmQUSa92pxnxjQuPU"
-//             .parse()
-//             .unwrap()
-//     }
-//     fn cid3() -> Cid {
-//         "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi"
-//             .parse()
-//             .unwrap()
-//     }
-//     fn cid4() -> Cid {
-//         "QmbWqxBEKC3P8tqsKc98xmWNzrzDtRLMiMPL8wBuTGsMnR"
-//             .parse()
-//             .unwrap()
-//     }
-//     fn cid5() -> Cid {
-//         "QmSnuWmxptJZdLJpKRarxBMS2Ju2oANVrgbr2xWbie9b2D"
-//             .parse()
-//             .unwrap()
-//     }
-//     fn cid6() -> Cid {
-//         "QmdmQXB2mzChmMeKY47C43LxUdg1NDJ5MWcKMKxDu7RgQm"
-//             .parse()
-//             .unwrap()
-//     }
-//     fn cid7() -> Cid {
-//         "bafybeiaysi4s6lnjev27ln5icwm6tueaw2vdykrtjkwiphwekaywqhcjze"
-//             .parse()
-//             .unwrap()
-//     }
-//     fn cid8() -> Cid {
-//         "bafyreif3tfdpr5n4jdrbielmcapwvbpcthepfkwq2vwonmlhirbjmotedi"
-//             .parse()
-//             .unwrap()
-//     }
-//     fn cid9() -> Cid {
-//         "bafyreicnokmhmrnlp2wjhyk2haep4tqxiptwfrp2rrs7rzq7uk766chqvq"
-//             .parse()
-//             .unwrap()
-//     }
+    //     fn cid2() -> Cid {
+    //         "QmY7Yh4UquoXHLPFo2XbhXkhBvFoPwmQUSa92pxnxjQuPU"
+    //             .parse()
+    //             .unwrap()
+    //     }
+    //     fn cid3() -> Cid {
+    //         "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi"
+    //             .parse()
+    //             .unwrap()
+    //     }
+    //     fn cid4() -> Cid {
+    //         "QmbWqxBEKC3P8tqsKc98xmWNzrzDtRLMiMPL8wBuTGsMnR"
+    //             .parse()
+    //             .unwrap()
+    //     }
+    //     fn cid5() -> Cid {
+    //         "QmSnuWmxptJZdLJpKRarxBMS2Ju2oANVrgbr2xWbie9b2D"
+    //             .parse()
+    //             .unwrap()
+    //     }
+    //     fn cid6() -> Cid {
+    //         "QmdmQXB2mzChmMeKY47C43LxUdg1NDJ5MWcKMKxDu7RgQm"
+    //             .parse()
+    //             .unwrap()
+    //     }
+    //     fn cid7() -> Cid {
+    //         "bafybeiaysi4s6lnjev27ln5icwm6tueaw2vdykrtjkwiphwekaywqhcjze"
+    //             .parse()
+    //             .unwrap()
+    //     }
+    //     fn cid8() -> Cid {
+    //         "bafyreif3tfdpr5n4jdrbielmcapwvbpcthepfkwq2vwonmlhirbjmotedi"
+    //             .parse()
+    //             .unwrap()
+    //     }
+    //     fn cid9() -> Cid {
+    //         "bafyreicnokmhmrnlp2wjhyk2haep4tqxiptwfrp2rrs7rzq7uk766chqvq"
+    //             .parse()
+    //             .unwrap()
+    //     }
 
     #[test]
     fn test_next_from_node_empty() {
@@ -316,162 +317,162 @@ mod test {
         assert_eq!(action_node.next(), Some(Need::Node(cid1())));
     }
 
-//     #[test]
-//     fn test_needs_from_node_just_one_record() {
-//         let node = Node {
-//             left: None,
-//             entries: vec![Entry {
-//                 keysuffix: "asdf".into(),
-//                 prefix_len: 0,
-//                 value: cid1(),
-//                 tree: None,
-//             }],
-//         };
-//         assert_eq!(
-//             needs_from_node(node).unwrap(),
-//             vec![Need::Record {
-//                 rkey: "asdf".into(),
-//                 cid: cid1(),
-//             },]
-//         );
-//     }
+    //     #[test]
+    //     fn test_needs_from_node_just_one_record() {
+    //         let node = Node {
+    //             left: None,
+    //             entries: vec![Entry {
+    //                 keysuffix: "asdf".into(),
+    //                 prefix_len: 0,
+    //                 value: cid1(),
+    //                 tree: None,
+    //             }],
+    //         };
+    //         assert_eq!(
+    //             needs_from_node(node).unwrap(),
+    //             vec![Need::Record {
+    //                 rkey: "asdf".into(),
+    //                 cid: cid1(),
+    //             },]
+    //         );
+    //     }
 
-//     #[test]
-//     fn test_needs_from_node_two_records() {
-//         let node = Node {
-//             left: None,
-//             entries: vec![
-//                 Entry {
-//                     keysuffix: "asdf".into(),
-//                     prefix_len: 0,
-//                     value: cid1(),
-//                     tree: None,
-//                 },
-//                 Entry {
-//                     keysuffix: "gh".into(),
-//                     prefix_len: 2,
-//                     value: cid2(),
-//                     tree: None,
-//                 },
-//             ],
-//         };
-//         assert_eq!(
-//             needs_from_node(node).unwrap(),
-//             vec![
-//                 Need::Record {
-//                     rkey: "asdf".into(),
-//                     cid: cid1(),
-//                 },
-//                 Need::Record {
-//                     rkey: "asgh".into(),
-//                     cid: cid2(),
-//                 },
-//             ]
-//         );
-//     }
+    //     #[test]
+    //     fn test_needs_from_node_two_records() {
+    //         let node = Node {
+    //             left: None,
+    //             entries: vec![
+    //                 Entry {
+    //                     keysuffix: "asdf".into(),
+    //                     prefix_len: 0,
+    //                     value: cid1(),
+    //                     tree: None,
+    //                 },
+    //                 Entry {
+    //                     keysuffix: "gh".into(),
+    //                     prefix_len: 2,
+    //                     value: cid2(),
+    //                     tree: None,
+    //                 },
+    //             ],
+    //         };
+    //         assert_eq!(
+    //             needs_from_node(node).unwrap(),
+    //             vec![
+    //                 Need::Record {
+    //                     rkey: "asdf".into(),
+    //                     cid: cid1(),
+    //                 },
+    //                 Need::Record {
+    //                     rkey: "asgh".into(),
+    //                     cid: cid2(),
+    //                 },
+    //             ]
+    //         );
+    //     }
 
-//     #[test]
-//     fn test_needs_from_node_with_both() {
-//         let node = Node {
-//             left: None,
-//             entries: vec![Entry {
-//                 keysuffix: "asdf".into(),
-//                 prefix_len: 0,
-//                 value: cid1(),
-//                 tree: Some(cid2()),
-//             }],
-//         };
-//         assert_eq!(
-//             needs_from_node(node).unwrap(),
-//             vec![
-//                 Need::Record {
-//                     rkey: "asdf".into(),
-//                     cid: cid1(),
-//                 },
-//                 Need::Node(cid2()),
-//             ]
-//         );
-//     }
+    //     #[test]
+    //     fn test_needs_from_node_with_both() {
+    //         let node = Node {
+    //             left: None,
+    //             entries: vec![Entry {
+    //                 keysuffix: "asdf".into(),
+    //                 prefix_len: 0,
+    //                 value: cid1(),
+    //                 tree: Some(cid2()),
+    //             }],
+    //         };
+    //         assert_eq!(
+    //             needs_from_node(node).unwrap(),
+    //             vec![
+    //                 Need::Record {
+    //                     rkey: "asdf".into(),
+    //                     cid: cid1(),
+    //                 },
+    //                 Need::Node(cid2()),
+    //             ]
+    //         );
+    //     }
 
-//     #[test]
-//     fn test_needs_from_node_left_and_record() {
-//         let node = Node {
-//             left: Some(cid1()),
-//             entries: vec![Entry {
-//                 keysuffix: "asdf".into(),
-//                 prefix_len: 0,
-//                 value: cid2(),
-//                 tree: None,
-//             }],
-//         };
-//         assert_eq!(
-//             needs_from_node(node).unwrap(),
-//             vec![
-//                 Need::Node(cid1()),
-//                 Need::Record {
-//                     rkey: "asdf".into(),
-//                     cid: cid2(),
-//                 },
-//             ]
-//         );
-//     }
+    //     #[test]
+    //     fn test_needs_from_node_left_and_record() {
+    //         let node = Node {
+    //             left: Some(cid1()),
+    //             entries: vec![Entry {
+    //                 keysuffix: "asdf".into(),
+    //                 prefix_len: 0,
+    //                 value: cid2(),
+    //                 tree: None,
+    //             }],
+    //         };
+    //         assert_eq!(
+    //             needs_from_node(node).unwrap(),
+    //             vec![
+    //                 Need::Node(cid1()),
+    //                 Need::Record {
+    //                     rkey: "asdf".into(),
+    //                     cid: cid2(),
+    //                 },
+    //             ]
+    //         );
+    //     }
 
-//     #[test]
-//     fn test_needs_from_full_node() {
-//         let node = Node {
-//             left: Some(cid1()),
-//             entries: vec![
-//                 Entry {
-//                     keysuffix: "asdf".into(),
-//                     prefix_len: 0,
-//                     value: cid2(),
-//                     tree: Some(cid3()),
-//                 },
-//                 Entry {
-//                     keysuffix: "ghi".into(),
-//                     prefix_len: 1,
-//                     value: cid4(),
-//                     tree: Some(cid5()),
-//                 },
-//                 Entry {
-//                     keysuffix: "jkl".into(),
-//                     prefix_len: 2,
-//                     value: cid6(),
-//                     tree: Some(cid7()),
-//                 },
-//                 Entry {
-//                     keysuffix: "mno".into(),
-//                     prefix_len: 4,
-//                     value: cid8(),
-//                     tree: Some(cid9()),
-//                 },
-//             ],
-//         };
-//         assert_eq!(
-//             needs_from_node(node).unwrap(),
-//             vec![
-//                 Need::Node(cid1()),
-//                 Need::Record {
-//                     rkey: "asdf".into(),
-//                     cid: cid2(),
-//                 },
-//                 Need::Node(cid3()),
-//                 Need::Record {
-//                     rkey: "aghi".into(),
-//                     cid: cid4(),
-//                 },
-//                 Need::Node(cid5()),
-//                 Need::Record {
-//                     rkey: "agjkl".into(),
-//                     cid: cid6(),
-//                 },
-//                 Need::Node(cid7()),
-//                 Need::Record {
-//                     rkey: "agjkmno".into(),
-//                     cid: cid8(),
-//                 },
-//                 Need::Node(cid9()),
-//             ]
-//         );
-//     }
+    //     #[test]
+    //     fn test_needs_from_full_node() {
+    //         let node = Node {
+    //             left: Some(cid1()),
+    //             entries: vec![
+    //                 Entry {
+    //                     keysuffix: "asdf".into(),
+    //                     prefix_len: 0,
+    //                     value: cid2(),
+    //                     tree: Some(cid3()),
+    //                 },
+    //                 Entry {
+    //                     keysuffix: "ghi".into(),
+    //                     prefix_len: 1,
+    //                     value: cid4(),
+    //                     tree: Some(cid5()),
+    //                 },
+    //                 Entry {
+    //                     keysuffix: "jkl".into(),
+    //                     prefix_len: 2,
+    //                     value: cid6(),
+    //                     tree: Some(cid7()),
+    //                 },
+    //                 Entry {
+    //                     keysuffix: "mno".into(),
+    //                     prefix_len: 4,
+    //                     value: cid8(),
+    //                     tree: Some(cid9()),
+    //                 },
+    //             ],
+    //         };
+    //         assert_eq!(
+    //             needs_from_node(node).unwrap(),
+    //             vec![
+    //                 Need::Node(cid1()),
+    //                 Need::Record {
+    //                     rkey: "asdf".into(),
+    //                     cid: cid2(),
+    //                 },
+    //                 Need::Node(cid3()),
+    //                 Need::Record {
+    //                     rkey: "aghi".into(),
+    //                     cid: cid4(),
+    //                 },
+    //                 Need::Node(cid5()),
+    //                 Need::Record {
+    //                     rkey: "agjkl".into(),
+    //                     cid: cid6(),
+    //                 },
+    //                 Need::Node(cid7()),
+    //                 Need::Record {
+    //                     rkey: "agjkmno".into(),
+    //                     cid: cid8(),
+    //                 },
+    //                 Need::Node(cid9()),
+    //             ]
+    //         );
+    //     }
 }
