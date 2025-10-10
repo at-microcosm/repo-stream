@@ -49,9 +49,6 @@ pub enum MaybeProcessedBlock<T, E> {
     /// If we _never_ needed this block, then we may have wasted a bit of effort
     /// trying to process it. Oh well.
     ///
-    /// It would be nice to store the real error type from the processing
-    /// function, but I'm leaving that generics puzzle for later.
-    ///
     /// There's an alternative here, which would be to kick unprocessable blocks
     /// back to Raw, or maybe even a new RawUnprocessable variant. Then we could
     /// surface the typed error later if needed by trying to reprocess.
