@@ -62,19 +62,19 @@ pub enum MaybeProcessedBlock<T> {
     Processed(Result<T, Box<dyn Error>>),
 }
 
-pub struct Vehicle<E, S: Stream<Item = CarBlock<E>>, T> {
+pub struct Vehicle<E, S: Stream<Item = CarBlock<E>>, T, F: Fn(&[u8]) -> Result<T, Box<dyn Error>>> {
     block_stream: S,
     blocks: HashMap<Cid, MaybeProcessedBlock<T>>,
     walker: Walker,
     walked_out: bool,
-    process: fn(&[u8]) -> Result<T, Box<dyn Error>>,
+    process: F,
 }
 
-impl<E: Error + 'static, S: Stream<Item = CarBlock<E>> + Unpin, T: Clone> Vehicle<E, S, T> {
+impl<E: Error + 'static, S: Stream<Item = CarBlock<E>> + Unpin, T: Clone, F: Fn(&[u8]) -> Result<T, Box<dyn Error>>> Vehicle<E, S, T, F> {
     pub async fn init(
         root: &Cid,
         mut block_stream: S,
-        process: fn(&[u8]) -> Result<T, Box<dyn Error>>,
+        process: F,
     ) -> Result<(Commit, Self), DriveError> {
         let mut blocks = HashMap::new();
 
@@ -122,15 +122,15 @@ impl<E: Error + 'static, S: Stream<Item = CarBlock<E>> + Unpin, T: Clone> Vehicl
     }
 }
 
-async fn drive_ahead<E: Error + 'static, S: Stream<Item = CarBlock<E>> + Unpin, T: Clone>(
-    vehicle: &mut Vehicle<E, S, T>,
+async fn drive_ahead<E: Error + 'static, S: Stream<Item = CarBlock<E>> + Unpin, T: Clone, F: Fn(&[u8]) -> Result<T, Box<dyn Error>>>(
+    vehicle: &mut Vehicle<E, S, T, F>,
 ) -> Result<Option<(Rkey, T)>, DriveError> {
 
     'outer: loop {
         // walk until we can't load a block
         let cid_needed = loop {
             // walk as far as we can until we run out of blocks or find a record
-            match vehicle.walker.walk(&mut vehicle.blocks, vehicle.process)? {
+            match vehicle.walker.walk(&mut vehicle.blocks, &vehicle.process)? {
                 Step::Rest(cid) => {
                     log::trace!("walker is resting, get another block");
                     // panic!("we should have had all blocks already");

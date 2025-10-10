@@ -180,7 +180,7 @@ impl Walker {
     pub fn walk<T: Clone>(
         &mut self,
         blocks: &mut HashMap<Cid, MaybeProcessedBlock<T>>,
-        process: fn(&[u8]) -> Result<T, Box<dyn std::error::Error>>,
+        process: impl Fn(&[u8]) -> Result<T, Box<dyn std::error::Error>>,
     ) -> Result<Step<T>, Trip> {
         loop {
             let Some(current_node) = self.stack.last_mut() else {
