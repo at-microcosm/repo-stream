@@ -20,6 +20,8 @@ pub enum DriveError {
     BadRecord(Box<dyn Error>),
     #[error("The Commit block reference by the root was not found")]
     MissingCommit,
+    #[error("The MST block {0} could not be found")]
+    MissingBlock(Cid),
     #[error("Failed to walk the mst tree: {0}")]
     Tripped(#[from] Trip),
     #[error("Not finished walking, but no more blocks are available to continue")]
@@ -145,7 +147,6 @@ async fn drive_ahead<E: Error + 'static, S: Stream<Item = CarBlock<E>> + Unpin, 
             }
         };
 
-        let mut found_any = false;
         // load blocks until we reach that cid
         while let Some((cid, data)) = vehicle
             .block_stream
@@ -153,7 +154,6 @@ async fn drive_ahead<E: Error + 'static, S: Stream<Item = CarBlock<E>> + Unpin, 
             .await
             .map_err(|e| DriveError::CarBlockError(e.into()))?
         {
-            found_any = true;
             let val = if Node::could_be(&data) {
                 MaybeProcessedBlock::Raw(data)
             } else {
@@ -166,11 +166,6 @@ async fn drive_ahead<E: Error + 'static, S: Stream<Item = CarBlock<E>> + Unpin, 
             }
         };
 
-        if !found_any {
-            panic!("walker unfinished but no more blocks to load");
-        }
+        return Err(DriveError::MissingBlock(cid_needed));
     }
-
-        // pause to let macos activity monitor's memory stat update, definitely the best way to do this
-        // tokio::time::sleep(std::time::Duration::from_secs(30)).await;
 }
