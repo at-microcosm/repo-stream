@@ -1,4 +1,4 @@
-//! rep-stream
+//! Fast and robust atproto CAR file processing in rust
 //!
 //! For now see the [examples](https://tangled.org/@microcosm.blue/repo-stream/tree/main/examples)
 
