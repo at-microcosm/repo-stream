@@ -65,36 +65,49 @@ pub enum MaybeProcessedBlock<T> {
 // TODO: generic error not box dyn nonsense.
 pub type ProcRes<T> = Result<T, Box<dyn Error>>;
 
-pub struct Vehicle<E, S: Stream<Item = CarBlock<E>>, T, F: Fn(&[u8]) -> ProcRes<T>> {
+pub struct Vehicle<SE, S, T, P>
+where
+    S: Stream<Item = CarBlock<SE>>,
+    P: Fn(&[u8]) -> ProcRes<T>,
+{
     block_stream: S,
     blocks: HashMap<Cid, MaybeProcessedBlock<T>>,
     walker: Walker,
-    process: F,
+    process: P,
 }
 
-impl<E: Error + 'static, S: Stream<Item = CarBlock<E>> + Unpin, T: Clone, F: Fn(&[u8]) -> ProcRes<T>> Vehicle<E, S, T, F> {
+impl<SE, S, T: Clone, P> Vehicle<SE, S, T, P>
+where
+    SE: Error + 'static,
+    S: Stream<Item = CarBlock<SE>> + Unpin,
+    P: Fn(&[u8]) -> ProcRes<T>,
+{
     pub async fn init(
-        root: &Cid,
+        root: Cid,
         mut block_stream: S,
-        process: F,
+        process: P,
     ) -> Result<(Commit, Self), DriveError> {
         let mut blocks = HashMap::new();
 
         let mut commit = None;
-        while let Some((block_cid, data)) = block_stream
+
+        while let Some((cid, data)) = block_stream
             .try_next()
             .await
             .map_err(|e| DriveError::CarBlockError(e.into()))?
         {
-            if block_cid == *root {
+            if cid == root {
                 let c: Commit = serde_ipld_dagcbor::from_slice(&data)
                     .map_err(|e| DriveError::BadCommit(e.into()))?;
                 commit = Some(c);
                 break; // inner while
+            } else {
+                blocks.insert(cid, if Node::could_be(&data) {
+                    MaybeProcessedBlock::Raw(data)
+                } else {
+                    MaybeProcessedBlock::Processed(process(&data))
+                });
             }
-            // lazy: before the commit just stash raw blocks
-            // TODO: eh???
-            blocks.insert(block_cid, MaybeProcessedBlock::Raw(data));
         }
 
         // we either broke out or read all the blocks without finding the commit...
@@ -111,49 +124,38 @@ impl<E: Error + 'static, S: Stream<Item = CarBlock<E>> + Unpin, T: Clone, F: Fn(
         Ok((commit, me))
     }
 
+    async fn drive_until(&mut self, cid_needed: Cid) -> Result<(), DriveError> {
+        while let Some((cid, data)) = self
+            .block_stream
+            .try_next()
+            .await
+            .map_err(|e| DriveError::CarBlockError(e.into()))?
+        {
+            self.blocks.insert(cid, if Node::could_be(&data) {
+                MaybeProcessedBlock::Raw(data)
+            } else {
+                MaybeProcessedBlock::Processed((self.process)(&data))
+            });
+            if cid == cid_needed {
+                return Ok(());
+            }
+        };
+
+        // if we never found the block
+        return Err(DriveError::MissingBlock(cid_needed));
+    }
+
     pub async fn next_record(&mut self) -> Result<Option<(Rkey, T)>, DriveError> {
-        'outer: loop {
-            // walk until we can't load a block
-            let cid_needed = loop {
-                // walk as far as we can until we run out of blocks or find a record
-                match self.walker.walk(&mut self.blocks, &self.process)? {
-                    Step::Rest(cid) => {
-                        log::trace!("walker is resting, get another block");
-                        // panic!("we should have had all blocks already");
-                        // self.walked_out = true;
-                        break cid;
-                    }
-                    Step::Finish => {
-                        log::trace!("walker finished");
-                        return Ok(None);
-                    }
-                    Step::Step { rkey, data } => {
-                        return Ok(Some((Rkey(rkey), data)));
-                    }
-                }
+        loop {
+            // walk as far as we can until we run out of blocks or find a record
+            let cid_needed = match self.walker.walk(&mut self.blocks, &self.process)? {
+                Step::Rest(cid) => cid,
+                Step::Finish => return Ok(None),
+                Step::Step { rkey, data } => return Ok(Some((Rkey(rkey), data))),
             };
 
             // load blocks until we reach that cid
-            while let Some((cid, data)) = self
-                .block_stream
-                .try_next()
-                .await
-                .map_err(|e| DriveError::CarBlockError(e.into()))?
-            {
-                let val = if Node::could_be(&data) {
-                    MaybeProcessedBlock::Raw(data)
-                } else {
-                    MaybeProcessedBlock::Processed((self.process)(&data))
-                };
-                self.blocks.insert(cid, val);
-
-                if cid == cid_needed {
-                    continue 'outer;
-                }
-            };
-
-            // if we never found the block that the walker said we need
-            return Err(DriveError::MissingBlock(cid_needed));
+            self.drive_until(cid_needed).await?;
         }
     }
 
