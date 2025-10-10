@@ -1,6 +1,7 @@
 //! Depth-first MST traversal
 
 use crate::mst::Node;
+use crate::drive::MaybeProcessedBlock;
 use ipld_core::cid::Cid;
 use std::collections::HashMap;
 use std::fmt;
@@ -11,6 +12,8 @@ pub enum Trip {
     NodeEmpty,
     #[error("Failed to decode commit block: {0}")]
     BadCommit(Box<dyn std::error::Error>),
+    #[error("Failed to process record: {0}")]
+    RecordFailedProcessing(Box<dyn std::error::Error>),
     #[error("Failed to compute an rkey due to invalid prefix_len")]
     EntryPrefixOutOfbounds,
     #[error("RKey was not utf-8")]
@@ -18,10 +21,10 @@ pub enum Trip {
 }
 
 #[derive(Debug)]
-pub enum Step {
+pub enum Step<T> {
     Rest,
     Finish,
-    Step { rkey: String, data: Vec<u8> },
+    Step { rkey: String, data: T },
 }
 
 /// some block we need (or have found)
@@ -172,7 +175,7 @@ impl Walker {
         }
     }
 
-    pub fn walk(&mut self, blocks: &mut HashMap<Cid, Vec<u8>>) -> Result<Step, Trip> {
+    pub fn walk(&mut self, blocks: &mut HashMap<Cid, MaybeProcessedBlock<usize>>) -> Result<Step<usize>, Trip> {
         loop {
             let Some(current_node) = self.stack.last_mut() else {
                 log::trace!("tried to walk but we're actually done.");
@@ -190,7 +193,11 @@ impl Walker {
                         log::trace!("node not found, resting");
                         return Ok(Step::Rest);
                     };
-                    let node = serde_ipld_dagcbor::from_slice::<Node>(&block)
+
+                    let MaybeProcessedBlock::Raw(data) = block else {
+                        return Err(Trip::BadCommit("failed commit fingerprint".into()));
+                    };
+                    let node = serde_ipld_dagcbor::from_slice::<Node>(&data)
                         .map_err(|e| Trip::BadCommit(e.into()))?;
 
                     // found node, make sure we remember
@@ -206,7 +213,12 @@ impl Walker {
                         return Ok(Step::Rest);
                     };
                     let rkey = rkey.clone();
-                    let data = data.to_vec();
+                    let data = match data {
+                        MaybeProcessedBlock::Raw(data) => data.len(),
+                        MaybeProcessedBlock::Processed(Ok(t)) => *t,
+                        MaybeProcessedBlock::Processed(e) =>
+                            return Err(Trip::RecordFailedProcessing(format!("booo: {e:?}").into())), // TODO
+                    };
 
                     // found node, make sure we remember
                     current_node.found(cid);

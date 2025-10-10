@@ -3,7 +3,7 @@ use ipld_core::cid::Cid;
 use std::collections::HashMap;
 use std::error::Error;
 
-use crate::mst::Commit;
+use crate::mst::{Commit, Node};
 use crate::walk::{Step, Trip, Walker};
 
 #[derive(Debug, thiserror::Error)]
@@ -31,9 +31,38 @@ type CarBlock<E> = Result<(Cid, Vec<u8>), E>;
 #[derive(Debug)]
 pub struct Rkey(pub String);
 
+#[derive(Debug)]
+pub enum MaybeProcessedBlock<T> {
+    /// A block that's *probably* a Node (but we can't know yet)
+    ///
+    /// It *can be* a record that suspiciously looks a lot like a node, so we
+    /// cannot eagerly turn it into a Node. We only know for sure what it is
+    /// when we actually walk down the MST
+    Raw(Vec<u8>),
+    /// A processed record from a block that was definitely not a Node
+    ///
+    /// Processing has to be fallible because the CAR can have totally-unused
+    /// blocks, which can just be garbage. since we're eagerly trying to process
+    /// record blocks without knowing for sure that they *are* records, we
+    /// discard any definitely-not-nodes that fail processing and keep their
+    /// error in the buffer for them. if we later try to retreive them as a
+    /// record, then we can surface the error.
+    ///
+    /// If we _never_ needed this block, then we may have wasted a bit of effort
+    /// trying to process it. Oh well.
+    ///
+    /// It would be nice to store the real error type from the processing
+    /// function, but I'm leaving that generics puzzle for later.
+    ///
+    /// There's an alternative here, which would be to kick unprocessable blocks
+    /// back to Raw, or maybe even a new RawUnprocessable variant. Then we could
+    /// surface the typed error later if needed by trying to reprocess.
+    Processed(Result<T, Box<dyn Error>>),
+}
+
 pub struct Vehicle<E, S: Stream<Item = CarBlock<E>>> {
     block_stream: S,
-    blocks: HashMap<Cid, Vec<u8>>,
+    blocks: HashMap<Cid, MaybeProcessedBlock<usize>>,
     walker: Walker,
     walked_out: bool,
 }
@@ -54,7 +83,9 @@ impl<E: Error + 'static, S: Stream<Item = CarBlock<E>> + Unpin> Vehicle<E, S> {
                 commit = Some(c);
                 break; // inner while
             }
-            blocks.insert(block_cid, data);
+            // lazy: before the commit just stash raw blocks
+            // TODO: eh???
+            blocks.insert(block_cid, MaybeProcessedBlock::Raw(data));
         }
 
         // we either broke out or read all the blocks without finding the commit...
@@ -71,11 +102,11 @@ impl<E: Error + 'static, S: Stream<Item = CarBlock<E>> + Unpin> Vehicle<E, S> {
         Ok((commit, me))
     }
 
-    pub async fn next_record(&mut self) -> Result<Option<(Rkey, Vec<u8>)>, DriveError> {
+    pub async fn next_record(&mut self) -> Result<Option<(Rkey, usize)>, DriveError> {
         drive_ahead(self).await
     }
 
-    pub fn stream(self) -> impl Stream<Item = Result<(Rkey, Vec<u8>), DriveError>> {
+    pub fn stream(self) -> impl Stream<Item = Result<(Rkey, usize), DriveError>> {
         futures::stream::try_unfold(self, |mut this| async move {
             let maybe_record = drive_ahead(&mut this).await?;
             Ok(maybe_record.map(|b| (b, this)))
@@ -85,7 +116,7 @@ impl<E: Error + 'static, S: Stream<Item = CarBlock<E>> + Unpin> Vehicle<E, S> {
 
 async fn drive_ahead<E: Error + 'static, S: Stream<Item = CarBlock<E>> + Unpin>(
     vehicle: &mut Vehicle<E, S>,
-) -> Result<Option<(Rkey, Vec<u8>)>, DriveError> {
+) -> Result<Option<(Rkey, usize)>, DriveError> {
     // trying smth: load all blocks first
     if !vehicle.walked_out {
         // stopped at a rest, try to load more blocks first
@@ -93,25 +124,20 @@ async fn drive_ahead<E: Error + 'static, S: Stream<Item = CarBlock<E>> + Unpin>(
             .block_stream
             .try_next()
             .await
-            .map_err(|e| DriveError::CarBlockError(e.into()))? {
-            vehicle.blocks.insert(cid, data);
+            .map_err(|e| DriveError::CarBlockError(e.into()))?
+        {
+            let val = if Node::could_be(&data) {
+                MaybeProcessedBlock::Raw(data)
+            } else {
+                MaybeProcessedBlock::Processed(Ok(data.len()))
+            };
+            vehicle.blocks.insert(cid, val);
         };
         vehicle.walked_out = true;
+        // pause to let macos activity monitor's memory stat update, definitely the best way to do this
+        // tokio::time::sleep(std::time::Duration::from_secs(30)).await;
     }
     loop {
-        // if vehicle.walked_out {
-        //     // stopped at a rest, try to load more blocks first
-        //     let Some((cid, data)) = vehicle
-        //         .block_stream
-        //         .try_next()
-        //         .await
-        //         .map_err(|e| DriveError::CarBlockError(e.into()))?
-        //     else {
-        //         return Err(DriveError::Dnf);
-        //     };
-        //     vehicle.blocks.insert(cid, data);
-        //     vehicle.walked_out = false;
-        // }
 
         // walk as far as we can until we run out of blocks or find a record
         match vehicle.walker.walk(&mut vehicle.blocks)? {

@@ -52,6 +52,31 @@ pub struct Node {
 }
 
 impl Node {
+    /// test if a block could possibly be a node
+    ///
+    /// we can't eagerly decode records except where we're *sure* they cannot be
+    /// an mst node (and even then we can only attempt) because you can't know
+    /// with certainty what a block is supposed to be without actually walking
+    /// the tree.
+    ///
+    /// so if a block *could be* a node, any record converter must postpone
+    /// processing. if it turns out it happens to be a very node-looking record,
+    /// well, sorry, it just has to only be processed later when that's known.
+    pub fn could_be(bytes: impl AsRef<[u8]>) -> bool {
+        const NODE_FINGERPRINT: [u8; 3] = [
+            0xA2, // map length 2 (for "l" and "e" keys)
+            0x61, // text length 1
+            b'e', // "e" before "l" because map keys have to be lex-sorted
+            // 0x8?: "e" contains an array (0x8 nibble) of some length (low nib)
+        ];
+        let bytes = bytes.as_ref();
+        bytes.starts_with(&NODE_FINGERPRINT)
+            && bytes.get(3).map(|b| b & 0xF0 == 0x80).unwrap_or(false)
+    }
+}
+
+
+impl Node {
     /// Check if a node has any entries
     ///
     /// An empty repository with no records is represented as a single MST node

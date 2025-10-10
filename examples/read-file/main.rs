@@ -18,6 +18,7 @@ async fn main() -> Result<()> {
 
     let Args { file } = Args::parse();
     let reader = tokio::fs::File::open(file).await?;
+    let reader = tokio::io::BufReader::new(reader);
 
     println!("hello!");
 
@@ -40,7 +41,7 @@ async fn main() -> Result<()> {
     log::info!("got commit: {commit:?}");
 
     while let Some((rkey, rec)) = record_stream.try_next().await? {
-        log::info!("got {rkey:?} {}", rec.len());
+        log::info!("got {rkey:?} {rec:?}");
     }
     log::info!("bye!");
 
