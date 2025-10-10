@@ -17,8 +17,6 @@ pub enum Trip<E: Error> {
     RecordFailedProcessing(Box<dyn Error>),
     #[error("Action node error: {0}")]
     ActionNode(#[from] ActionNodeError),
-    #[error("RKey was not utf-8")]
-    EntryRkeyNotUtf8(#[from] std::string::FromUtf8Error),
     #[error("Process failed: {0}")]
     ProcessFailed(E),
 }
@@ -27,6 +25,8 @@ pub enum Trip<E: Error> {
 pub enum ActionNodeError {
     #[error("Failed to compute an rkey due to invalid prefix_len")]
     EntryPrefixOutOfbounds,
+    #[error("RKey was not utf-8")]
+    EntryRkeyNotUtf8(#[from] std::string::FromUtf8Error),
 }
 
 #[derive(Debug)]
@@ -145,8 +145,10 @@ enum Need {
     Record { rkey: String, cid: Cid },
 }
 
-impl From<&Node> for ActionNode {
-    fn from(node: &Node) -> Self {
+impl TryFrom<&Node> for ActionNode {
+    type Error = ActionNodeError;
+
+    fn try_from(node: &Node) -> Result<Self, Self::Error> {
         let left_tree = node.left.as_ref().map(Into::into);
 
         let mut entries = vec![];
@@ -155,20 +157,19 @@ impl From<&Node> for ActionNode {
             let mut rkey = vec![];
             let pre_checked = prefix
                 .get(..entry.prefix_len)
-                .ok_or(ActionNodeError::EntryPrefixOutOfbounds)
-                .unwrap(); // TODO has to be try_from
+                .ok_or(ActionNodeError::EntryPrefixOutOfbounds)?;
             rkey.extend_from_slice(pre_checked);
             rkey.extend_from_slice(&entry.keysuffix);
             prefix = rkey.clone();
 
             entries.push(ActionEntry {
-                rkey: String::from_utf8(rkey).unwrap(), // TODO this has to be try_from
+                rkey: String::from_utf8(rkey)?, // TODO this has to be try_from
                 record: (&entry.value).into(),
                 tree: entry.tree.as_ref().map(Into::into),
             });
         }
 
-        ActionNode { left_tree, entries }
+        Ok(ActionNode { left_tree, entries })
     }
 }
 
@@ -217,7 +218,7 @@ impl Walker {
                     current_node.found(cid);
 
                     // queue up work on the found node next
-                    self.stack.push((&node).into());
+                    self.stack.push((&node).try_into()?);
                 }
                 Need::Record { rkey, cid } => {
                     log::trace!("need record {cid:?}");
@@ -303,7 +304,7 @@ mod test {
             left: None,
             entries: vec![],
         };
-        let action_node: ActionNode = (&node).into();
+        let action_node: ActionNode = (&node).try_into().unwrap();
         assert_eq!(action_node.next(), None);
     }
 
@@ -313,7 +314,7 @@ mod test {
             left: Some(cid1()),
             entries: vec![],
         };
-        let action_node: ActionNode = (&node).into();
+        let action_node: ActionNode = (&node).try_into().unwrap();
         assert_eq!(action_node.next(), Some(Need::Node(cid1())));
     }
 
