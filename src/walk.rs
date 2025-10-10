@@ -35,79 +35,52 @@ pub enum Step<T> {
     Step { rkey: String, data: T },
 }
 
-/// a transformed mst::Node which we can mutate and track progress on
-///
-/// contains an optional left subtree, whose contents are all to the left of
-/// every entry in the entries array.
-#[derive(Debug, PartialEq)]
-struct ActionNode {
-    entries: Vec<Need>,
-}
-
-impl ActionNode {
-    fn from_root(tree_root_cid: Cid) -> Self {
-        ActionNode {
-            entries: vec![Need::Node(tree_root_cid)],
-        }
-    }
-    fn next(&self) -> Option<Need> {
-        self.entries.last().cloned()
-    }
-    fn found(&mut self) {
-        self.entries.pop();
-    }
-}
-
 #[derive(Debug, Clone, PartialEq)]
 enum Need {
     Node(Cid),
     Record { rkey: String, cid: Cid },
 }
 
-impl TryFrom<&Node> for ActionNode {
-    type Error = ActionNodeError;
+fn push_from_node(stack: &mut Vec<Need>, node: &Node) -> Result<(), ActionNodeError> {
+    let mut entries = Vec::with_capacity(node.entries.len());
 
-    fn try_from(node: &Node) -> Result<Self, Self::Error> {
-        let mut entries = vec![];
+    let mut prefix = vec![];
+    for entry in &node.entries {
+        let mut rkey = vec![];
+        let pre_checked = prefix
+            .get(..entry.prefix_len)
+            .ok_or(ActionNodeError::EntryPrefixOutOfbounds)?;
+        rkey.extend_from_slice(pre_checked);
+        rkey.extend_from_slice(&entry.keysuffix);
+        prefix = rkey.clone();
 
-        if let Some(tree) = node.left {
-            entries.push(Need::Node(tree));
+        entries.push(Need::Record {
+            rkey: String::from_utf8(rkey)?,
+            cid: entry.value,
+        });
+        if let Some(ref tree) = entry.tree {
+            entries.push(Need::Node(*tree));
         }
-
-        let mut prefix = vec![];
-        for entry in &node.entries {
-            let mut rkey = vec![];
-            let pre_checked = prefix
-                .get(..entry.prefix_len)
-                .ok_or(ActionNodeError::EntryPrefixOutOfbounds)?;
-            rkey.extend_from_slice(pre_checked);
-            rkey.extend_from_slice(&entry.keysuffix);
-            prefix = rkey.clone();
-
-            entries.push(Need::Record {
-                rkey: String::from_utf8(rkey)?,
-                cid: entry.value,
-            });
-            if let Some(ref tree) = entry.tree {
-                entries.push(Need::Node(*tree));
-            }
-        }
-
-        entries.reverse();
-
-        Ok(ActionNode { entries })
     }
+
+    entries.reverse();
+    stack.append(&mut entries);
+
+    if let Some(tree) = node.left {
+        stack.push(Need::Node(tree));
+    }
+    Ok(())
 }
 
 #[derive(Debug)]
 pub struct Walker {
-    stack: Vec<ActionNode>,
+    stack: Vec<Need>,
 }
 
 impl Walker {
     pub fn new(tree_root_cid: Cid) -> Self {
         Self {
-            stack: vec![ActionNode::from_root(tree_root_cid)],
+            stack: vec![Need::Node(tree_root_cid)],
         }
     }
 
@@ -117,13 +90,9 @@ impl Walker {
         process: impl Fn(&[u8]) -> ProcRes<T, E>,
     ) -> Result<Step<T>, Trip<E>> {
         loop {
-            let Some(current_node) = self.stack.last_mut() else {
+            let Some(mut need) = self.stack.last() else {
                 log::trace!("tried to walk but we're actually done.");
                 return Ok(Step::Finish);
-            };
-            let Some(mut need) = current_node.next() else {
-                self.stack.pop();
-                continue;
             };
 
             match &mut need {
@@ -141,14 +110,14 @@ impl Walker {
                         .map_err(|e| Trip::BadCommit(e.into()))?;
 
                     // found node, make sure we remember
-                    current_node.found();
+                    self.stack.pop();
 
                     // queue up work on the found node next
-                    self.stack.push((&node).try_into()?);
+                    push_from_node(&mut self.stack, &node)?;
                 }
                 Need::Record { rkey, cid } => {
                     log::trace!("need record {cid:?}");
-                    let Some(data) = blocks.get(cid) else {
+                    let Some(data) = blocks.get_mut(cid) else {
                         log::trace!("record block not found, resting");
                         return Ok(Step::Rest(*cid));
                     };
@@ -156,13 +125,20 @@ impl Walker {
                     let data = match data {
                         MaybeProcessedBlock::Raw(data) => process(data),
                         MaybeProcessedBlock::Processed(Ok(t)) => Ok(t.clone()),
-                        MaybeProcessedBlock::Processed(_e) => {
-                            return Err(Trip::RecordFailedProcessing("booo".into()));
-                        } // TODO
+                        bad => {
+                            // big hack to pull the error out -- this corrupts
+                            // a block, so we should not continue trying to work
+                            let mut steal = MaybeProcessedBlock::Raw(vec![]);
+                            std::mem::swap(&mut steal, bad);
+                            let MaybeProcessedBlock::Processed(Err(e)) = steal else {
+                                unreachable!();
+                            };
+                            return Err(Trip::ProcessFailed(e));
+                        }
                     };
 
                     // found node, make sure we remember
-                    current_node.found();
+                    self.stack.pop();
 
                     log::trace!("emitting a block as a step. depth={}", self.stack.len());
                     let data = data.map_err(Trip::ProcessFailed)?;
@@ -230,8 +206,9 @@ mod test {
             left: None,
             entries: vec![],
         };
-        let action_node: ActionNode = (&node).try_into().unwrap();
-        assert_eq!(action_node.next(), None);
+        let mut stack = vec![];
+        push_from_node(&mut stack, &node).unwrap();
+        assert_eq!(stack.last(), None);
     }
 
     #[test]
@@ -240,8 +217,9 @@ mod test {
             left: Some(cid1()),
             entries: vec![],
         };
-        let action_node: ActionNode = (&node).try_into().unwrap();
-        assert_eq!(action_node.next(), Some(Need::Node(cid1())));
+        let mut stack = vec![];
+        push_from_node(&mut stack, &node).unwrap();
+        assert_eq!(stack.last(), Some(Need::Node(cid1())).as_ref());
     }
 
     //     #[test]
