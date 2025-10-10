@@ -1,8 +1,33 @@
 # repo-stream
 
-a futures atproto record stream from CAR file
+Fast and (aspirationally) robust atproto CAR file processing in rust
 
-current notes
+
+todo
+
+- [ ] car file test fixtures & validation tests
+- [ ] make sure we can get the did and signature out for verification
+- [ ] spec compliance todos
+  - [ ] assert that keys are ordered and fail if not
+  - [ ] verify node mst depth from key (possibly pending [interop test fixes](https://github.com/bluesky-social/atproto-interop-tests/issues/5))
+- [ ] performance todos
+  - [ ] consume the serialized nodes into a mutable efficient format
+    - [ ] maybe customize the deserialize impl to do that directly?
+  - [ ] benchmark and profile
+- [ ] robustness todos
+  - [ ] swap the blocks hashmap for a BlockStore trait that can be dumped to redb
+    - [ ] maybe keep the redb function behind a feature flag?
+  - [ ] can we assert a max size for node blocks?
+  - [ ] figure out why asserting the upper nibble of the fourth byte of a node fails fingerprinting
+  - [ ] max mst depth (there is actually a hard limit but a malicious repo could do anything)
+  - [ ] i don't think we need a max recursion depth for processing cbor contents since we leave records to the user to decode
+
+newer ideas
+
+- fixing the interleaved mst walk/ block load actually does perform ok: just need the walker to tell the block loader which block we actually need next, so that the block loader can go ahead and load all blocks until that one without checking back with the walker. so i think we're streaming-order ready!
+
+
+later ideas
 
 - just buffering all the blocks is 2.5x faster than interleaving optimistic walking
   - at least, this is true on huge CARs with the current (stream-unfriendly) pds export behaviour
