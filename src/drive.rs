@@ -27,10 +27,6 @@ pub enum DriveError<E: Error> {
 
 type CarBlock<E> = Result<(Cid, Vec<u8>), E>;
 
-/// Newtype because i'll mix up strings somewhere if i don't
-#[derive(Debug)]
-pub struct Rkey(pub String);
-
 #[derive(Debug)]
 pub enum MaybeProcessedBlock<T, E> {
     /// A block that's *probably* a Node (but we can't know yet)
