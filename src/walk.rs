@@ -6,6 +6,7 @@ use ipld_core::cid::Cid;
 use std::collections::HashMap;
 use std::error::Error;
 
+/// Errors that can happen while walking
 #[derive(Debug, thiserror::Error)]
 pub enum Trip<E: Error> {
     #[error("empty mst nodes are not allowed")]
@@ -13,23 +14,32 @@ pub enum Trip<E: Error> {
     #[error("Failed to decode commit block: {0}")]
     BadCommit(Box<dyn std::error::Error>),
     #[error("Action node error: {0}")]
-    ActionNode(#[from] ActionNodeError),
+    RkeyError(#[from] RkeyError),
     #[error("Process failed: {0}")]
     ProcessFailed(E),
+    #[error("Encountered an rkey out of order while walking the MST")]
+    RkeyOutOfOrder,
 }
 
+/// Errors from invalid Rkeys
 #[derive(Debug, thiserror::Error)]
-pub enum ActionNodeError {
+pub enum RkeyError {
     #[error("Failed to compute an rkey due to invalid prefix_len")]
     EntryPrefixOutOfbounds,
     #[error("RKey was not utf-8")]
     EntryRkeyNotUtf8(#[from] std::string::FromUtf8Error),
 }
 
+/// Walker outputs
 #[derive(Debug)]
 pub enum Step<T> {
+    /// We need a CID but it's not in the block store
+    ///
+    /// Give the needed CID to the driver so it can load blocks until it's found
     Rest(Cid),
+    /// Reached the end of the MST! yay!
     Finish,
+    /// A record was found!
     Step { rkey: String, data: T },
 }
 
@@ -39,7 +49,7 @@ enum Need {
     Record { rkey: String, cid: Cid },
 }
 
-fn push_from_node(stack: &mut Vec<Need>, node: &Node) -> Result<(), ActionNodeError> {
+fn push_from_node(stack: &mut Vec<Need>, node: &Node) -> Result<(), RkeyError> {
     let mut entries = Vec::with_capacity(node.entries.len());
 
     let mut prefix = vec![];
@@ -47,7 +57,7 @@ fn push_from_node(stack: &mut Vec<Need>, node: &Node) -> Result<(), ActionNodeEr
         let mut rkey = vec![];
         let pre_checked = prefix
             .get(..entry.prefix_len)
-            .ok_or(ActionNodeError::EntryPrefixOutOfbounds)?;
+            .ok_or(RkeyError::EntryPrefixOutOfbounds)?;
         rkey.extend_from_slice(pre_checked);
         rkey.extend_from_slice(&entry.keysuffix);
         prefix = rkey.clone();
@@ -70,19 +80,25 @@ fn push_from_node(stack: &mut Vec<Need>, node: &Node) -> Result<(), ActionNodeEr
     Ok(())
 }
 
+/// Traverser of an atproto MST
+///
+/// Walks the tree from left-to-right in depth-first order
 #[derive(Debug)]
 pub struct Walker {
     stack: Vec<Need>,
+    prev: String,
 }
 
 impl Walker {
     pub fn new(tree_root_cid: Cid) -> Self {
         Self {
             stack: vec![Need::Node(tree_root_cid)],
+            prev: "".to_string(),
         }
     }
 
-    pub fn walk<T: Clone, E: Error>(
+    /// Advance through nodes until we find a record or can't go further
+    pub fn step<T: Clone, E: Error>(
         &mut self,
         blocks: &mut HashMap<Cid, MaybeProcessedBlock<T, E>>,
         process: impl Fn(&[u8]) -> Result<T, E>,
@@ -140,6 +156,14 @@ impl Walker {
 
                     log::trace!("emitting a block as a step. depth={}", self.stack.len());
                     let data = data.map_err(Trip::ProcessFailed)?;
+
+                    // rkeys *must* be in order or else the tree is invalid (or
+                    // we have a bug)
+                    if rkey <= self.prev {
+                        return Err(Trip::RkeyOutOfOrder);
+                    }
+                    self.prev = rkey.clone();
+
                     return Ok(Step::Step { rkey, data });
                 }
             }

@@ -1,3 +1,5 @@
+//! Consume an MST block stream, producing an ordered stream of records
+
 use futures::{Stream, TryStreamExt};
 use ipld_core::cid::Cid;
 use std::collections::HashMap;
@@ -6,6 +8,7 @@ use std::error::Error;
 use crate::mst::{Commit, Node};
 use crate::walk::{Step, Trip, Walker};
 
+/// Errors that can happen while consuming and emitting blocks and records
 #[derive(Debug, thiserror::Error)]
 pub enum DriveError<E: Error> {
     #[error("Failed to initialize CarReader: {0}")]
@@ -20,12 +23,11 @@ pub enum DriveError<E: Error> {
     MissingBlock(Cid),
     #[error("Failed to walk the mst tree: {0}")]
     Tripped(#[from] Trip<E>),
-    #[error("Encountered an rkey out of order while walking the MST")]
-    RkeyOutOfOrder,
 }
 
 type CarBlock<E> = Result<(Cid, Vec<u8>), E>;
 
+/// Newtype because i'll mix up strings somewhere if i don't
 #[derive(Debug)]
 pub struct Rkey(pub String);
 
@@ -55,6 +57,7 @@ pub enum MaybeProcessedBlock<T, E> {
     Processed(Result<T, E>),
 }
 
+/// The core driver between the block stream and MST walker
 pub struct Vehicle<SE, S, T, P, PE>
 where
     S: Stream<Item = CarBlock<SE>>,
@@ -65,7 +68,6 @@ where
     blocks: HashMap<Cid, MaybeProcessedBlock<T, PE>>,
     walker: Walker,
     process: P,
-    prev_rkey: String,
 }
 
 impl<SE, S, T: Clone, P, PE> Vehicle<SE, S, T, P, PE>
@@ -75,6 +77,23 @@ where
     P: Fn(&[u8]) -> Result<T, PE>,
     PE: Error,
 {
+    /// Set up the stream
+    ///
+    /// This will eagerly consume blocks until the `Commit` object is found.
+    /// *Usually* the it's the first block, but there is no guarantee.
+    ///
+    /// ### Parameters
+    ///
+    /// `root`: CID of the commit object that is the root of the MST
+    ///
+    /// `block_stream`: Input stream of raw CAR blocks
+    ///
+    /// `process`: record-transforming callback:
+    ///
+    /// For tasks where records can be quickly processed into a *smaller*
+    /// useful representation, you can do that eagerly as blocks come in by
+    /// passing the processor as a callback here. This can reduce overall
+    /// memory usage.
     pub async fn init(
         root: Cid,
         mut block_stream: S,
@@ -116,7 +135,6 @@ where
             blocks,
             walker,
             process,
-            prev_rkey: "".to_string(),
         };
         Ok((commit, me))
     }
@@ -145,18 +163,14 @@ where
         Err(DriveError::MissingBlock(cid_needed))
     }
 
-    pub async fn next_record(&mut self) -> Result<Option<(Rkey, T)>, DriveError<PE>> {
+    /// Manually step through the record outputs
+    pub async fn next_record(&mut self) -> Result<Option<(String, T)>, DriveError<PE>> {
         loop {
             // walk as far as we can until we run out of blocks or find a record
-            let cid_needed = match self.walker.walk(&mut self.blocks, &self.process)? {
+            let cid_needed = match self.walker.step(&mut self.blocks, &self.process)? {
                 Step::Rest(cid) => cid,
                 Step::Finish => return Ok(None),
-                Step::Step { rkey, data } => {
-                    if rkey <= self.prev_rkey {
-                        return Err(DriveError::RkeyOutOfOrder);
-                    }
-                    return Ok(Some((Rkey(rkey), data)));
-                }
+                Step::Step { rkey, data } => return Ok(Some((rkey, data))),
             };
 
             // load blocks until we reach that cid
@@ -164,7 +178,8 @@ where
         }
     }
 
-    pub fn stream(self) -> impl Stream<Item = Result<(Rkey, T), DriveError<PE>>> {
+    /// Convert to a futures::stream of record outputs
+    pub fn stream(self) -> impl Stream<Item = Result<(String, T), DriveError<PE>>> {
         futures::stream::try_unfold(self, |mut this| async move {
             let maybe_record = this.next_record().await?;
             Ok(maybe_record.map(|b| (b, this)))

@@ -33,11 +33,11 @@ async fn test_car(bytes: &[u8], expected_records: usize, expected_sum: usize) {
     while let Some((rkey, size)) = record_stream.try_next().await.unwrap() {
         records += 1;
         sum += size;
-        if rkey.0 == "app.bsky.actor.profile/self" {
+        if rkey == "app.bsky.actor.profile/self" {
             found_bsky_profile = true;
         }
-        assert!(rkey.0 > prev_rkey, "rkeys are streamed in order");
-        prev_rkey = rkey.0;
+        assert!(rkey > prev_rkey, "rkeys are streamed in order");
+        prev_rkey = rkey;
     }
     assert_eq!(records, expected_records);
     assert_eq!(sum, expected_sum);
