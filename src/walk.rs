@@ -5,7 +5,6 @@ use crate::mst::Node;
 use ipld_core::cid::Cid;
 use std::collections::HashMap;
 use std::error::Error;
-use std::fmt;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Trip<E: Error> {
@@ -36,110 +35,30 @@ pub enum Step<T> {
     Step { rkey: String, data: T },
 }
 
-/// some block we need (or have found)
-#[derive(Clone, PartialEq)]
-struct FindableLink {
-    cid: Cid,
-    found: bool,
-}
-
-impl From<&Cid> for FindableLink {
-    fn from(cid: &Cid) -> Self {
-        let cid = *cid;
-        let found = false;
-        FindableLink { cid, found }
-    }
-}
-
-impl fmt::Debug for FindableLink {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let status = if self.found { "??" } else { "ok" };
-        let cid_s = self.cid.to_string_of_base(multibase::Base::Base64).unwrap();
-        let split_at = cid_s.char_indices().nth_back(4).unwrap().0;
-        let cid_s = &cid_s[split_at..];
-        write!(f, "({status} [{cid_s}])")
-    }
-}
-
-/// a transformed mst::Entry with decompressed rkeys and which we can mutate
-///
-/// contains exactly one record link, and one optional subtree whose contents
-/// are all to the right of this record's rkey
-#[derive(Debug, PartialEq)]
-struct ActionEntry {
-    rkey: String,
-    record: FindableLink,
-    tree: Option<FindableLink>,
-}
-
 /// a transformed mst::Node which we can mutate and track progress on
 ///
 /// contains an optional left subtree, whose contents are all to the left of
 /// every entry in the entries array.
 #[derive(Debug, PartialEq)]
 struct ActionNode {
-    left_tree: Option<FindableLink>,
-    entries: Vec<ActionEntry>,
+    entries: Vec<Need>,
 }
 
 impl ActionNode {
     fn from_root(tree_root_cid: Cid) -> Self {
         ActionNode {
-            left_tree: Some((&tree_root_cid).into()),
-            entries: vec![],
+            entries: vec![Need::Node(tree_root_cid)],
         }
     }
     fn next(&self) -> Option<Need> {
-        if let Some(findable) = &self.left_tree
-            && !findable.found
-        {
-            return Some(Need::Node(findable.cid));
-        }
-        for ActionEntry { rkey, record, tree } in &self.entries {
-            if !record.found {
-                return Some(Need::Record {
-                    rkey: rkey.to_string(),
-                    cid: record.cid,
-                });
-            }
-            if let Some(findable) = tree
-                && !findable.found
-            {
-                return Some(Need::Node(findable.cid));
-            }
-        }
-        None
+        self.entries.last().cloned()
     }
-    fn found(&mut self, cid: &Cid) {
-        // just be horrible for now, whatever
-        if let Some(findable) = &mut self.left_tree
-            && !findable.found
-        {
-            assert_eq!(*cid, findable.cid, "wrong found for next");
-            findable.found = true;
-            return;
-        }
-        for ActionEntry { record, tree, .. } in &mut self.entries {
-            if !record.found {
-                assert_eq!(*cid, record.cid, "wrong found for next, expected record");
-                record.found = true;
-                return;
-            }
-            if let Some(findable) = tree
-                && !findable.found
-            {
-                assert_eq!(
-                    *cid, findable.cid,
-                    "wrong found for next, expected entry tree"
-                );
-                findable.found = true;
-                return;
-            }
-        }
+    fn found(&mut self) {
+        self.entries.pop();
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 enum Need {
     Node(Cid),
     Record { rkey: String, cid: Cid },
@@ -149,9 +68,12 @@ impl TryFrom<&Node> for ActionNode {
     type Error = ActionNodeError;
 
     fn try_from(node: &Node) -> Result<Self, Self::Error> {
-        let left_tree = node.left.as_ref().map(Into::into);
-
         let mut entries = vec![];
+
+        if let Some(tree) = node.left {
+            entries.push(Need::Node(tree));
+        }
+
         let mut prefix = vec![];
         for entry in &node.entries {
             let mut rkey = vec![];
@@ -162,14 +84,18 @@ impl TryFrom<&Node> for ActionNode {
             rkey.extend_from_slice(&entry.keysuffix);
             prefix = rkey.clone();
 
-            entries.push(ActionEntry {
-                rkey: String::from_utf8(rkey)?, // TODO this has to be try_from
-                record: (&entry.value).into(),
-                tree: entry.tree.as_ref().map(Into::into),
+            entries.push(Need::Record {
+                rkey: String::from_utf8(rkey)?,
+                cid: entry.value,
             });
+            if let Some(ref tree) = entry.tree {
+                entries.push(Need::Node(*tree));
+            }
         }
 
-        Ok(ActionNode { left_tree, entries })
+        entries.reverse();
+
+        Ok(ActionNode { entries })
     }
 }
 
@@ -215,7 +141,7 @@ impl Walker {
                         .map_err(|e| Trip::BadCommit(e.into()))?;
 
                     // found node, make sure we remember
-                    current_node.found(cid);
+                    current_node.found();
 
                     // queue up work on the found node next
                     self.stack.push((&node).try_into()?);
@@ -236,7 +162,7 @@ impl Walker {
                     };
 
                     // found node, make sure we remember
-                    current_node.found(cid);
+                    current_node.found();
 
                     log::trace!("emitting a block as a step. depth={}", self.stack.len());
                     let data = data.map_err(Trip::ProcessFailed)?;
