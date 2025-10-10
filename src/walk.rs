@@ -1,6 +1,6 @@
 //! Depth-first MST traversal
 
-use crate::drive::{MaybeProcessedBlock, ProcRes};
+use crate::drive::MaybeProcessedBlock;
 use crate::mst::Node;
 use ipld_core::cid::Cid;
 use std::collections::HashMap;
@@ -85,7 +85,7 @@ impl Walker {
     pub fn walk<T: Clone, E: Error>(
         &mut self,
         blocks: &mut HashMap<Cid, MaybeProcessedBlock<T, E>>,
-        process: impl Fn(&[u8]) -> ProcRes<T, E>,
+        process: impl Fn(&[u8]) -> Result<T, E>,
     ) -> Result<Step<T>, Trip<E>> {
         loop {
             let Some(mut need) = self.stack.last() else {

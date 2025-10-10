@@ -55,13 +55,10 @@ pub enum MaybeProcessedBlock<T, E> {
     Processed(Result<T, E>),
 }
 
-// TODO: generic error not box dyn nonsense.
-pub type ProcRes<T, E> = Result<T, E>;
-
 pub struct Vehicle<SE, S, T, P, PE>
 where
     S: Stream<Item = CarBlock<SE>>,
-    P: Fn(&[u8]) -> ProcRes<T, PE>,
+    P: Fn(&[u8]) -> Result<T, PE>,
     PE: Error,
 {
     block_stream: S,
@@ -75,7 +72,7 @@ impl<SE, S, T: Clone, P, PE> Vehicle<SE, S, T, P, PE>
 where
     SE: Error + 'static,
     S: Stream<Item = CarBlock<SE>> + Unpin,
-    P: Fn(&[u8]) -> ProcRes<T, PE>,
+    P: Fn(&[u8]) -> Result<T, PE>,
     PE: Error,
 {
     pub async fn init(
