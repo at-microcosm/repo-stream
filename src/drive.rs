@@ -62,15 +62,17 @@ pub enum MaybeProcessedBlock<T> {
     Processed(Result<T, Box<dyn Error>>),
 }
 
-pub struct Vehicle<E, S: Stream<Item = CarBlock<E>>, T, F: Fn(&[u8]) -> Result<T, Box<dyn Error>>> {
+// TODO: generic error not box dyn nonsense.
+pub type ProcRes<T> = Result<T, Box<dyn Error>>;
+
+pub struct Vehicle<E, S: Stream<Item = CarBlock<E>>, T, F: Fn(&[u8]) -> ProcRes<T>> {
     block_stream: S,
     blocks: HashMap<Cid, MaybeProcessedBlock<T>>,
     walker: Walker,
-    walked_out: bool,
     process: F,
 }
 
-impl<E: Error + 'static, S: Stream<Item = CarBlock<E>> + Unpin, T: Clone, F: Fn(&[u8]) -> Result<T, Box<dyn Error>>> Vehicle<E, S, T, F> {
+impl<E: Error + 'static, S: Stream<Item = CarBlock<E>> + Unpin, T: Clone, F: Fn(&[u8]) -> ProcRes<T>> Vehicle<E, S, T, F> {
     pub async fn init(
         root: &Cid,
         mut block_stream: S,
@@ -104,68 +106,61 @@ impl<E: Error + 'static, S: Stream<Item = CarBlock<E>> + Unpin, T: Clone, F: Fn(
             block_stream,
             blocks,
             walker,
-            walked_out: false,
             process,
         };
         Ok((commit, me))
     }
 
     pub async fn next_record(&mut self) -> Result<Option<(Rkey, T)>, DriveError> {
-        drive_ahead(self).await
+        'outer: loop {
+            // walk until we can't load a block
+            let cid_needed = loop {
+                // walk as far as we can until we run out of blocks or find a record
+                match self.walker.walk(&mut self.blocks, &self.process)? {
+                    Step::Rest(cid) => {
+                        log::trace!("walker is resting, get another block");
+                        // panic!("we should have had all blocks already");
+                        // self.walked_out = true;
+                        break cid;
+                    }
+                    Step::Finish => {
+                        log::trace!("walker finished");
+                        return Ok(None);
+                    }
+                    Step::Step { rkey, data } => {
+                        return Ok(Some((Rkey(rkey), data)));
+                    }
+                }
+            };
+
+            // load blocks until we reach that cid
+            while let Some((cid, data)) = self
+                .block_stream
+                .try_next()
+                .await
+                .map_err(|e| DriveError::CarBlockError(e.into()))?
+            {
+                let val = if Node::could_be(&data) {
+                    MaybeProcessedBlock::Raw(data)
+                } else {
+                    MaybeProcessedBlock::Processed((self.process)(&data))
+                };
+                self.blocks.insert(cid, val);
+
+                if cid == cid_needed {
+                    continue 'outer;
+                }
+            };
+
+            // if we never found the block that the walker said we need
+            return Err(DriveError::MissingBlock(cid_needed));
+        }
     }
 
     pub fn stream(self) -> impl Stream<Item = Result<(Rkey, T), DriveError>> {
         futures::stream::try_unfold(self, |mut this| async move {
-            let maybe_record = drive_ahead(&mut this).await?;
+            let maybe_record = this.next_record().await?;
             Ok(maybe_record.map(|b| (b, this)))
         })
-    }
-}
-
-async fn drive_ahead<E: Error + 'static, S: Stream<Item = CarBlock<E>> + Unpin, T: Clone, F: Fn(&[u8]) -> Result<T, Box<dyn Error>>>(
-    vehicle: &mut Vehicle<E, S, T, F>,
-) -> Result<Option<(Rkey, T)>, DriveError> {
-
-    'outer: loop {
-        // walk until we can't load a block
-        let cid_needed = loop {
-            // walk as far as we can until we run out of blocks or find a record
-            match vehicle.walker.walk(&mut vehicle.blocks, &vehicle.process)? {
-                Step::Rest(cid) => {
-                    log::trace!("walker is resting, get another block");
-                    // panic!("we should have had all blocks already");
-                    // vehicle.walked_out = true;
-                    break cid;
-                }
-                Step::Finish => {
-                    log::trace!("walker finished");
-                    return Ok(None);
-                }
-                Step::Step { rkey, data } => {
-                    return Ok(Some((Rkey(rkey), data)));
-                }
-            }
-        };
-
-        // load blocks until we reach that cid
-        while let Some((cid, data)) = vehicle
-            .block_stream
-            .try_next()
-            .await
-            .map_err(|e| DriveError::CarBlockError(e.into()))?
-        {
-            let val = if Node::could_be(&data) {
-                MaybeProcessedBlock::Raw(data)
-            } else {
-                MaybeProcessedBlock::Processed((vehicle.process)(&data))
-            };
-            vehicle.blocks.insert(cid, val);
-
-            if cid == cid_needed {
-                continue 'outer;
-            }
-        };
-
-        return Err(DriveError::MissingBlock(cid_needed));
     }
 }

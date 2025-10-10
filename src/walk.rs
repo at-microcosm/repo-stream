@@ -1,7 +1,7 @@
 //! Depth-first MST traversal
 
 use crate::mst::Node;
-use crate::drive::MaybeProcessedBlock;
+use crate::drive::{MaybeProcessedBlock, ProcRes};
 use ipld_core::cid::Cid;
 use std::collections::HashMap;
 use std::fmt;
@@ -180,7 +180,7 @@ impl Walker {
     pub fn walk<T: Clone>(
         &mut self,
         blocks: &mut HashMap<Cid, MaybeProcessedBlock<T>>,
-        process: impl Fn(&[u8]) -> Result<T, Box<dyn std::error::Error>>,
+        process: impl Fn(&[u8]) -> ProcRes<T>,
     ) -> Result<Step<T>, Trip> {
         loop {
             let Some(current_node) = self.stack.last_mut() else {
