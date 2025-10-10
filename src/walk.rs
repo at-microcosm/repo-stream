@@ -24,7 +24,7 @@ pub enum Trip {
 
 #[derive(Debug)]
 pub enum Step<T> {
-    Rest,
+    Rest(Cid),
     Finish,
     Step { rkey: String, data: T },
 }
@@ -197,7 +197,7 @@ impl Walker {
                     log::trace!("need node {cid:?}");
                     let Some(block) = blocks.remove(cid) else {
                         log::trace!("node not found, resting");
-                        return Ok(Step::Rest);
+                        return Ok(Step::Rest(*cid));
                     };
 
                     let MaybeProcessedBlock::Raw(data) = block else {
@@ -216,7 +216,7 @@ impl Walker {
                     log::trace!("need record {cid:?}");
                     let Some(data) = blocks.get(cid) else {
                         log::trace!("record block not found, resting");
-                        return Ok(Step::Rest);
+                        return Ok(Step::Rest(*cid));
                     };
                     let rkey = rkey.clone();
                     let data = match data {

@@ -71,7 +71,7 @@ impl Node {
         ];
         let bytes = bytes.as_ref();
         bytes.starts_with(&NODE_FINGERPRINT)
-            && bytes.get(3).map(|b| b & 0xF0 == 0x80).unwrap_or(false)
+            // && bytes.get(3).map(|b| b & 0xF0 == 0x80).unwrap_or(false)
     }
 }
 

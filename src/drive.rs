@@ -123,42 +123,54 @@ impl<E: Error + 'static, S: Stream<Item = CarBlock<E>> + Unpin, T: Clone> Vehicl
 async fn drive_ahead<E: Error + 'static, S: Stream<Item = CarBlock<E>> + Unpin, T: Clone>(
     vehicle: &mut Vehicle<E, S, T>,
 ) -> Result<Option<(Rkey, T)>, DriveError> {
-    // trying smth: load all blocks first
-    if !vehicle.walked_out {
-        // stopped at a rest, try to load more blocks first
+
+    'outer: loop {
+        // walk until we can't load a block
+        let cid_needed = loop {
+            // walk as far as we can until we run out of blocks or find a record
+            match vehicle.walker.walk(&mut vehicle.blocks, vehicle.process)? {
+                Step::Rest(cid) => {
+                    log::trace!("walker is resting, get another block");
+                    // panic!("we should have had all blocks already");
+                    // vehicle.walked_out = true;
+                    break cid;
+                }
+                Step::Finish => {
+                    log::trace!("walker finished");
+                    return Ok(None);
+                }
+                Step::Step { rkey, data } => {
+                    return Ok(Some((Rkey(rkey), data)));
+                }
+            }
+        };
+
+        let mut found_any = false;
+        // load blocks until we reach that cid
         while let Some((cid, data)) = vehicle
             .block_stream
             .try_next()
             .await
             .map_err(|e| DriveError::CarBlockError(e.into()))?
         {
+            found_any = true;
             let val = if Node::could_be(&data) {
                 MaybeProcessedBlock::Raw(data)
             } else {
                 MaybeProcessedBlock::Processed((vehicle.process)(&data))
             };
             vehicle.blocks.insert(cid, val);
-        };
-        vehicle.walked_out = true;
-        // pause to let macos activity monitor's memory stat update, definitely the best way to do this
-        // tokio::time::sleep(std::time::Duration::from_secs(30)).await;
-    }
-    loop {
 
-        // walk as far as we can until we run out of blocks or find a record
-        match vehicle.walker.walk(&mut vehicle.blocks, vehicle.process)? {
-            Step::Rest => {
-                log::trace!("walker is resting, get another block");
-                panic!("we should have had all blocks already");
-                // vehicle.walked_out = true;
+            if cid == cid_needed {
+                continue 'outer;
             }
-            Step::Finish => {
-                log::trace!("walker finished");
-                return Ok(None);
-            }
-            Step::Step { rkey, data } => {
-                return Ok(Some((Rkey(rkey), data)));
-            }
+        };
+
+        if !found_any {
+            panic!("walker unfinished but no more blocks to load");
         }
     }
+
+        // pause to let macos activity monitor's memory stat update, definitely the best way to do this
+        // tokio::time::sleep(std::time::Duration::from_secs(30)).await;
 }
