@@ -67,11 +67,14 @@ impl Node {
             0xA2, // map length 2 (for "l" and "e" keys)
             0x61, // text length 1
             b'e', // "e" before "l" because map keys have to be lex-sorted
-                  // 0x8?: "e" contains an array (0x8 nibble) of some length (low nib)
+                  // 0x8?: "e" has array (0x100 upper 3 bits) of some length
         ];
         let bytes = bytes.as_ref();
         bytes.starts_with(&NODE_FINGERPRINT)
-        // && bytes.get(3).map(|b| b & 0xF0 == 0x80).unwrap_or(false)
+            && bytes
+                .get(3)
+                .map(|b| b & 0b1110_0000 == 0x80)
+                .unwrap_or(false)
     }
 
     /// Check if a node has any entries
