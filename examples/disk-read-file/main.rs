@@ -1,0 +1,57 @@
+extern crate repo_stream;
+use clap::Parser;
+use futures::TryStreamExt;
+use iroh_car::CarReader;
+use std::convert::Infallible;
+use std::path::PathBuf;
+
+type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
+
+#[derive(Debug, Parser)]
+struct Args {
+    #[arg()]
+    car: PathBuf,
+    #[arg()]
+    tmpfile: PathBuf,
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    env_logger::init();
+
+    let Args { car, tmpfile } = Args::parse();
+    let reader = tokio::fs::File::open(car).await?;
+    let reader = tokio::io::BufReader::new(reader);
+
+    println!("hello!");
+
+    let reader = CarReader::new(reader).await?;
+
+    let redb_store = repo_stream::disk_redb::RedbStore::new(tmpfile)?;
+
+    let root = reader
+        .header()
+        .roots()
+        .first()
+        .ok_or("missing root")?
+        .clone();
+    log::debug!("root: {root:?}");
+
+    // let stream = Box::pin(reader.stream());
+    let stream = std::pin::pin!(reader.stream());
+
+    let (commit, v) = repo_stream::disk_drive::Vehicle::init(root, stream, redb_store, |block| {
+        Ok::<_, Infallible>(block.len())
+    })
+    .await?;
+    let mut record_stream = std::pin::pin!(v.stream());
+
+    log::info!("got commit: {commit:?}");
+
+    while let Some((rkey, _rec)) = record_stream.try_next().await? {
+        log::info!("got {rkey:?}");
+    }
+    log::info!("bye!");
+
+    Ok(())
+}
