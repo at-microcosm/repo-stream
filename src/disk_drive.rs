@@ -70,6 +70,7 @@ where
     P: Fn(&[u8]) -> Result<T, PE>,
     PE: Error,
 {
+    #[allow(dead_code)]
     block_stream: S,
     block_store: BS,
     walker: Walker,
@@ -110,6 +111,9 @@ where
     ) -> Result<(Commit, Self), DriveError> {
         let mut commit = None;
 
+        log::warn!("init: load blocks");
+
+        // go ahead and put all blocks in the block store
         while let Some((cid, data)) = block_stream
             .try_next()
             .await
@@ -119,7 +123,6 @@ where
                 let c: Commit = serde_ipld_dagcbor::from_slice(&data)
                     .map_err(|e| DriveError::BadCommit(e.into()))?;
                 commit = Some(c);
-                break;
             } else {
                 block_store.put(
                     cid,
@@ -135,10 +138,14 @@ where
             }
         }
 
+        log::warn!("init: got commit?");
+
         // we either broke out or read all the blocks without finding the commit...
         let commit = commit.ok_or(DriveError::MissingCommit)?;
 
         let walker = Walker::new(commit.data);
+
+        log::warn!("init: wrapping up");
 
         let me = Self {
             block_stream,
@@ -149,45 +156,12 @@ where
         Ok((commit, me))
     }
 
-    async fn drive_until(&mut self, cid_needed: Cid) -> Result<(), DriveError> {
-        while let Some((cid, data)) = self
-            .block_stream
-            .try_next()
-            .await
-            .map_err(|e| DriveError::CarBlockError(e.into()))?
-        {
-            self.block_store.put(
-                cid,
-                if Node::could_be(&data) {
-                    MaybeProcessedBlock::Raw(data)
-                } else {
-                    match (self.process)(&data) {
-                        Ok(t) => MaybeProcessedBlock::ProcessedOk(t),
-                        Err(e) => MaybeProcessedBlock::Unprocessable(e.to_string()),
-                    }
-                },
-            );
-            if cid == cid_needed {
-                return Ok(());
-            }
-        }
-
-        // if we never found the block
-        Err(DriveError::MissingBlock(cid_needed))
-    }
-
     /// Manually step through the record outputs
     pub async fn next_record(&mut self) -> Result<Option<(String, T)>, DriveError> {
-        loop {
-            // walk as far as we can until we run out of blocks or find a record
-            let cid_needed = match self.walker.step(&mut self.block_store, &self.process)? {
-                Step::Rest(cid) => cid,
-                Step::Finish => return Ok(None),
-                Step::Step { rkey, data } => return Ok(Some((rkey, data))),
-            };
-
-            // load blocks until we reach that cid
-            self.drive_until(cid_needed).await?;
+        match self.walker.step(&mut self.block_store, &self.process)? {
+            Step::Rest(cid) => Err(DriveError::MissingBlock(cid)),
+            Step::Finish => Ok(None),
+            Step::Step { rkey, data } => Ok(Some((rkey, data))),
         }
     }
 

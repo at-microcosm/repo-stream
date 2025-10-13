@@ -12,7 +12,9 @@ pub struct RedbStore {
 
 impl RedbStore {
     pub fn new(path: impl AsRef<Path>) -> Result<Self, Error> {
+        log::warn!("redb new");
         let db = Database::create(path)?;
+        log::warn!("db created");
         Ok(Self { db })
     }
 }
@@ -35,11 +37,7 @@ impl<MPB: Serialize + DeserializeOwned> BlockStore<MPB> for RedbStore {
     fn get(&self, c: Cid) -> Option<MPB> {
         let key_bytes = c.to_bytes();
         let tx = self.db.begin_read().unwrap();
-        let table = match tx.open_table(TABLE) {
-            Ok(t) => t,
-            Err(redb::TableError::TableDoesNotExist(_)) => return None,
-            e => e.unwrap(),
-        };
+        let table = tx.open_table(TABLE).unwrap();
         let maybe_val_bytes = table.get(&*key_bytes).unwrap()?;
         let (t, n): (MPB, usize) =
             bincode::serde::decode_from_slice(maybe_val_bytes.value(), bincode::config::standard())

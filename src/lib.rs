@@ -4,6 +4,7 @@
 
 pub mod disk_drive;
 pub mod disk_redb;
+pub mod disk_sqlite;
 pub mod disk_walk;
 pub mod drive;
 pub mod mst;
