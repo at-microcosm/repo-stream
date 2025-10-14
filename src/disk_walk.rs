@@ -1,6 +1,6 @@
 //! Depth-first MST traversal
 
-use crate::disk_drive::{BlockStore, MaybeProcessedBlock};
+use crate::disk_drive::BlockStore;
 use crate::mst::Node;
 
 use ipld_core::cid::Cid;
@@ -101,7 +101,7 @@ impl Walker {
     /// Advance through nodes until we find a record or can't go further
     pub fn step<T: Clone + Serialize + DeserializeOwned, E: Error>(
         &mut self,
-        block_store: &mut impl BlockStore<MaybeProcessedBlock<T>>,
+        block_store: &mut impl BlockStore<Vec<u8>>,
         process: impl Fn(&[u8]) -> Result<T, E>,
     ) -> Result<Step<T>, Trip> {
         loop {
@@ -113,14 +113,11 @@ impl Walker {
             match &mut need {
                 Need::Node(cid) => {
                     log::trace!("need node {cid:?}");
-                    let Some(mpb) = block_store.get(*cid) else {
+                    let Some(block) = block_store.get(*cid) else {
                         log::trace!("node not found, resting");
                         return Ok(Step::Rest(*cid));
                     };
 
-                    let MaybeProcessedBlock::<T>::Raw(block) = mpb else {
-                        return Err(Trip::BadCommit("failed commit fingerprint".into()));
-                    };
                     let node = serde_ipld_dagcbor::from_slice::<Node>(&block)
                         .map_err(|e| Trip::BadCommit(e.into()))?;
 
@@ -132,21 +129,13 @@ impl Walker {
                 }
                 Need::Record { rkey, cid } => {
                     log::trace!("need record {cid:?}");
-                    let Some(mpb) = block_store.get(*cid) else {
+                    let Some(block) = block_store.get(*cid) else {
                         log::trace!("record block not found, resting");
                         return Ok(Step::Rest(*cid));
                     };
                     let rkey = rkey.clone();
-                    let data = match mpb {
-                        MaybeProcessedBlock::Raw(data) => match process(&data) {
-                            Ok(t) => Ok(t),
-                            Err(e) => Err(Trip::ProcessFailed(e.to_string())),
-                        },
-                        MaybeProcessedBlock::ProcessedOk(t) => Ok(t.clone()),
-                        MaybeProcessedBlock::Unprocessable(s) => {
-                            return Err(Trip::ProcessFailed(s.clone()));
-                        }
-                    };
+
+                    let data = process(&block).map_err(|e| Trip::ProcessFailed(e.to_string()));
 
                     // found node, make sure we remember
                     self.stack.pop();

@@ -1,6 +1,6 @@
 use crate::disk_drive::BlockStore;
 use ipld_core::cid::Cid;
-use redb::{Database, Error, ReadableTable, TableDefinition, WriteTransaction};
+use redb::{Database, Durability, Error, ReadableDatabase, TableDefinition};
 use serde::{Serialize, de::DeserializeOwned};
 use std::path::Path;
 
@@ -9,7 +9,6 @@ const TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("blocks");
 pub struct RedbStore {
     #[allow(dead_code)]
     db: Database,
-    tx: Option<WriteTransaction>,
 }
 
 impl RedbStore {
@@ -17,32 +16,41 @@ impl RedbStore {
         log::warn!("redb new");
         let db = Database::create(path)?;
         log::warn!("db created");
-        let mut tx = db.begin_write()?;
-        tx.set_durability(redb::Durability::None).unwrap();
-        log::warn!("transaction begun");
-        Ok(Self { db, tx: Some(tx) })
+        Ok(Self { db })
     }
 }
 
 impl Drop for RedbStore {
     fn drop(&mut self) {
-        let tx = self.tx.take();
-        tx.unwrap().abort().unwrap();
+        let mut tx = self.db.begin_write().unwrap();
+        tx.set_durability(Durability::None).unwrap();
+        tx.delete_table(TABLE).unwrap();
+        tx.commit().unwrap();
     }
 }
 
 impl<MPB: Serialize + DeserializeOwned> BlockStore<MPB> for RedbStore {
-    fn put(&self, c: Cid, t: MPB) {
-        let key_bytes = c.to_bytes();
-        let val_bytes = bincode::serde::encode_to_vec(t, bincode::config::standard()).unwrap();
+    fn put_batch(&self, blocks: Vec<(Cid, MPB)>) {
+        let mut tx = self.db.begin_write().unwrap();
+        tx.set_durability(Durability::None).unwrap();
+
         {
-            let mut table = self.tx.as_ref().unwrap().open_table(TABLE).unwrap();
-            table.insert(&*key_bytes, &*val_bytes).unwrap();
+            let mut table = tx.open_table(TABLE).unwrap();
+            for (cid, t) in blocks {
+                let key_bytes = cid.to_bytes();
+                let val_bytes =
+                    bincode::serde::encode_to_vec(t, bincode::config::standard()).unwrap();
+                table.insert(&*key_bytes, &*val_bytes).unwrap();
+            }
         }
+
+        tx.commit().unwrap();
     }
+
     fn get(&self, c: Cid) -> Option<MPB> {
         let key_bytes = c.to_bytes();
-        let table = self.tx.as_ref().unwrap().open_table(TABLE).unwrap();
+        let tx = self.db.begin_read().unwrap();
+        let table = tx.open_table(TABLE).unwrap();
         let maybe_val_bytes = table.get(&*key_bytes).unwrap()?;
         let (t, n): (MPB, usize) =
             bincode::serde::decode_from_slice(maybe_val_bytes.value(), bincode::config::standard())

@@ -4,10 +4,9 @@ use std::error::Error;
 
 use crate::disk_walk::{Step, Trip, Walker};
 use crate::mst::Commit;
-use crate::mst::Node;
 
 use ipld_core::cid::Cid;
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde::{Serialize, de::DeserializeOwned};
 
 /// Errors that can happen while consuming and emitting blocks and records
 #[derive(Debug, thiserror::Error)]
@@ -26,35 +25,8 @@ pub enum DriveError {
     Tripped(#[from] Trip),
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum MaybeProcessedBlock<T: Clone + Serialize> {
-    /// A block that's *probably* a Node (but we can't know yet)
-    ///
-    /// It *can be* a record that suspiciously looks a lot like a node, so we
-    /// cannot eagerly turn it into a Node. We only know for sure what it is
-    /// when we actually walk down the MST
-    Raw(Vec<u8>),
-    /// A processed record from a block that was definitely not a Node
-    ///
-    /// If we _never_ needed this block, then we may have wasted a bit of effort
-    /// trying to process it. Oh well.
-    ///
-    /// Processing has to be fallible because the CAR can have totally-unused
-    /// blocks, which can just be garbage. since we're eagerly trying to process
-    /// record blocks without knowing for sure that they *are* records, we
-    /// discard any definitely-not-nodes that fail processing and keep their
-    /// error in the buffer for them. if we later try to retreive them as a
-    /// record, then we can surface the error.
-    ///
-    /// The error type is `String` because we don't really want to put
-    /// any constraints like `Serialize` on the error type, and `Error`
-    /// at least requires `Display`. It's a compromise.
-    ProcessedOk(T),
-    Unprocessable(String),
-}
-
 pub trait BlockStore<MPB: Serialize + DeserializeOwned> {
-    fn put(&self, key: Cid, value: MPB); // unwraps for now
+    fn put_batch(&self, blocks: Vec<(Cid, MPB)>); // unwraps for now
     fn get(&self, key: Cid) -> Option<MPB>;
 }
 
@@ -66,12 +38,12 @@ where
     SE: Error + 'static,
     S: Stream<Item = CarBlock<SE>>,
     T: Clone + Serialize + DeserializeOwned,
-    BS: BlockStore<MaybeProcessedBlock<T>>,
+    BS: BlockStore<Vec<u8>>,
     P: Fn(&[u8]) -> Result<T, PE>,
     PE: Error,
 {
     #[allow(dead_code)]
-    block_stream: S,
+    block_stream: Option<S>,
     block_store: BS,
     walker: Walker,
     process: P,
@@ -82,7 +54,7 @@ where
     SE: Error + 'static,
     S: Stream<Item = CarBlock<SE>> + Unpin,
     T: Clone + Serialize + DeserializeOwned,
-    BS: BlockStore<MaybeProcessedBlock<T>>,
+    BS: BlockStore<Vec<u8>>,
     P: Fn(&[u8]) -> Result<T, PE>,
     PE: Error,
 {
@@ -105,7 +77,7 @@ where
     /// memory usage.
     pub async fn init(
         root: Cid,
-        mut block_stream: S,
+        block_stream: S,
         block_store: BS,
         process: P,
     ) -> Result<(Commit, Self), DriveError> {
@@ -113,29 +85,25 @@ where
 
         log::warn!("init: load blocks");
 
+        let mut chunked = block_stream.try_chunks(4096);
+
         // go ahead and put all blocks in the block store
-        while let Some((cid, data)) = block_stream
+        while let Some(chunk) = chunked
             .try_next()
             .await
             .map_err(|e| DriveError::CarBlockError(e.into()))?
         {
-            if cid == root {
-                let c: Commit = serde_ipld_dagcbor::from_slice(&data)
-                    .map_err(|e| DriveError::BadCommit(e.into()))?;
-                commit = Some(c);
-            } else {
-                block_store.put(
-                    cid,
-                    if Node::could_be(&data) {
-                        MaybeProcessedBlock::Raw(data)
-                    } else {
-                        match process(&data) {
-                            Ok(t) => MaybeProcessedBlock::ProcessedOk(t),
-                            Err(e) => MaybeProcessedBlock::Unprocessable(e.to_string()),
-                        }
-                    },
-                );
+            let mut to_insert = Vec::with_capacity(chunk.len());
+            for (cid, data) in chunk {
+                if cid == root {
+                    let c: Commit = serde_ipld_dagcbor::from_slice(&data)
+                        .map_err(|e| DriveError::BadCommit(e.into()))?;
+                    commit = Some(c);
+                } else {
+                    to_insert.push((cid, data));
+                }
             }
+            block_store.put_batch(to_insert)
         }
 
         log::warn!("init: got commit?");
@@ -148,7 +116,7 @@ where
         log::warn!("init: wrapping up");
 
         let me = Self {
-            block_stream,
+            block_stream: None,
             block_store,
             walker,
             process,
