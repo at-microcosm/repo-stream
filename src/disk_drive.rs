@@ -1,5 +1,6 @@
 use futures::Stream;
 use futures::TryStreamExt;
+use std::collections::VecDeque;
 use std::error::Error;
 
 use crate::disk_walk::{Step, Trip, Walker};
@@ -47,6 +48,7 @@ where
     block_store: BS,
     walker: Walker,
     process: P,
+    out_cache: VecDeque<(String, T)>,
 }
 
 impl<SE, S, T, BS, P, PE> Vehicle<SE, S, T, BS, P, PE>
@@ -120,17 +122,43 @@ where
             block_store,
             walker,
             process,
+            out_cache: VecDeque::new(),
         };
         Ok((commit, me))
     }
 
+    async fn load_chunk(&mut self, n: usize) -> Result<(), DriveError> {
+        self.out_cache.reserve(n);
+        for _ in 0..n {
+            let item = match self.walker.step(&mut self.block_store, &self.process)? {
+                Step::Step { rkey, data } => (rkey, data),
+                Step::Finish => break,
+                Step::Rest(cid) => return Err(DriveError::MissingBlock(cid)),
+            };
+            self.out_cache.push_back(item);
+        }
+        Ok(())
+    }
+
+    /// Get a chunk of records at a time
+    ///
+    /// the number of returned records may be smaller or larger than requested
+    /// (but non-zero), even if it's not the last chunk.
+    ///
+    /// an empty vec will be returned to signal the end.
+    pub async fn next_chunk(&mut self, n: usize) -> Result<Vec<(String, T)>, DriveError> {
+        if self.out_cache.is_empty() {
+            self.load_chunk(n).await?;
+        }
+        Ok(std::mem::take(&mut self.out_cache).into())
+    }
+
     /// Manually step through the record outputs
     pub async fn next_record(&mut self) -> Result<Option<(String, T)>, DriveError> {
-        match self.walker.step(&mut self.block_store, &self.process)? {
-            Step::Rest(cid) => Err(DriveError::MissingBlock(cid)),
-            Step::Finish => Ok(None),
-            Step::Step { rkey, data } => Ok(Some((rkey, data))),
+        if self.out_cache.is_empty() {
+            self.load_chunk(64).await?; // TODO
         }
+        Ok(self.out_cache.pop_front())
     }
 
     /// Convert to a futures::stream of record outputs

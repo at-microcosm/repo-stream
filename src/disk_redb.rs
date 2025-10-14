@@ -45,7 +45,9 @@ impl BlockStore<Vec<u8>> for RedbStore {
             }
 
             tx.commit().unwrap();
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
     }
 
     fn get(&self, c: Cid) -> Option<Vec<u8>> {
