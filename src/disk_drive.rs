@@ -26,7 +26,7 @@ pub enum DriveError {
 }
 
 pub trait BlockStore<MPB: Serialize + DeserializeOwned> {
-    fn put_batch(&self, blocks: Vec<(Cid, MPB)>); // unwraps for now
+    fn put_batch(&self, blocks: Vec<(Cid, MPB)>) -> impl std::future::Future<Output = ()> + Send; // unwraps for now
     fn get(&self, key: Cid) -> Option<MPB>;
 }
 
@@ -103,7 +103,7 @@ where
                     to_insert.push((cid, data));
                 }
             }
-            block_store.put_batch(to_insert)
+            block_store.put_batch(to_insert).await;
         }
 
         log::warn!("init: got commit?");
