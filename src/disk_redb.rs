@@ -1,4 +1,4 @@
-use crate::disk_drive::{BlockStore, BlockStoreError};
+use crate::disk_drive::{BlockStore, BlockStoreError, MaybeProcessedBlock, Records};
 use crate::disk_walk::{Need, Walker};
 use ipld_core::cid::Cid;
 use redb::{Database, Durability, Error, ReadableDatabase, TableDefinition};
@@ -40,7 +40,7 @@ impl<E: Into<Error>> From<E> for BlockStoreError {
     }
 }
 
-impl BlockStore<Vec<u8>> for RedbStore {
+impl BlockStore for RedbStore {
     async fn put_batch(&self, blocks: Vec<(Cid, Vec<u8>)>) -> Result<(), BlockStoreError> {
         let db = self.db.clone();
         tokio::task::spawn_blocking(move || -> Result<(), BlockStoreError> {
@@ -65,7 +65,7 @@ impl BlockStore<Vec<u8>> for RedbStore {
         &self,
         mut walker: Walker,
         n: usize,
-    ) -> Result<(Walker, Vec<(String, Vec<u8>)>), BlockStoreError> {
+    ) -> Result<(Walker, Records), BlockStoreError> {
         let db = self.db.clone();
         tokio::task::spawn_blocking(move || -> Result<_, BlockStoreError> {
             let tx = db.begin_read()?;
@@ -83,8 +83,17 @@ impl BlockStore<Vec<u8>> for RedbStore {
                 let block = res.value();
 
                 match need {
-                    Need::Node(_) => walker
-                        .handle_node(block)?,
+                    Need::Node(_) => {
+                        let (mpb, n) =
+                            bincode::serde::decode_from_slice(block, bincode::config::standard())
+                                .unwrap();
+                        assert_eq!(n, block.len());
+                        // DANGER: we're throwing in unit () as a placeholder here and assuming bincode will still work since Raw is the first variant
+                        let MaybeProcessedBlock::Raw(bytes): MaybeProcessedBlock<()> = mpb else {
+                            panic!("should have not been processed"); // tODO
+                        };
+                        walker.handle_node(&bytes)?
+                    }
                     Need::Record { rkey, .. } => {
                         out.push((rkey, block.to_vec()));
                         if out.len() >= n {

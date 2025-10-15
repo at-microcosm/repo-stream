@@ -40,10 +40,9 @@ async fn main() -> Result<()> {
     // let stream = Box::pin(reader.stream());
     let stream = std::pin::pin!(reader.stream());
 
-    let (commit, v) = repo_stream::disk_drive::Vehicle::init(root, stream, redb_store, |block| {
-        Ok::<_, Infallible>(block.len())
-    })
-    .await?;
+    let (commit, v) =
+        repo_stream::disk_drive::Vehicle::init(root, stream, redb_store, |block| block.len())
+            .await?;
     let mut record_stream = std::pin::pin!(v.stream());
 
     log::info!("got commit: {commit:?}");

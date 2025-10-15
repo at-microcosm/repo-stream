@@ -28,8 +28,8 @@ pub enum RkeyError {
     EntryRkeyNotUtf8(#[from] std::string::FromUtf8Error),
     #[error("Encountered an rkey out of order while walking the MST")]
     RkeyOutOfOrder,
-    #[error("Failed to decode commit block: {0}")]
-    BlockDecodeError(#[from] serde_ipld_dagcbor::DecodeError<Infallible>),
+    #[error("Failed to decode node block: {0}")]
+    NodeDecodeError(#[from] serde_ipld_dagcbor::DecodeError<Infallible>),
 }
 
 /// Walker outputs
