@@ -3,7 +3,7 @@ use futures::TryStreamExt;
 use std::collections::VecDeque;
 use std::error::Error;
 
-use crate::disk_walk::{Trip, Walker};
+use crate::disk_walk::{Trip, Walker, RkeyError};
 use crate::mst::Commit;
 
 use ipld_core::cid::Cid;
@@ -41,16 +41,32 @@ pub enum WalkError {
     Tripped(#[from] Trip),
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum BlockStoreError {
+    #[error("Error from the storage backend: {0}")]
+    StorageBackend(Box<dyn Error + Send>),
+
+    #[error(transparent)]
+    RkeyError(#[from] RkeyError),
+
+    // this should probably not be up here
+    #[error("Failed to join tokio task: {0}")]
+    JoinError(tokio::task::JoinError),
+
+    #[error("Could not find block: {0}")]
+    MissingBlock(Cid),
+}
+
 /// Storage backend for caching large-repo blocks
 ///
 /// Since
 pub trait BlockStore<MPB: Serialize + DeserializeOwned> {
-    fn put_batch(&self, blocks: Vec<(Cid, MPB)>) -> impl Future<Output = ()> + Send; // unwraps for now
+    fn put_batch(&self, blocks: Vec<(Cid, MPB)>) -> impl Future<Output = Result<(), BlockStoreError>>; // unwraps for now
     fn walk_batch(
         &self,
         walker: Walker,
         n: usize,
-    ) -> impl Future<Output = Result<(Walker, Vec<(String, MPB)>), String>>; // boo string error for now because
+    ) -> impl Future<Output = Result<(Walker, Vec<(String, MPB)>), BlockStoreError>>; // boo string error for now because
 }
 
 type CarBlock<E> = Result<(Cid, Vec<u8>), E>;
@@ -127,7 +143,10 @@ where
                     to_insert.push((cid, data));
                 }
             }
-            block_store.put_batch(to_insert).await;
+            block_store
+                .put_batch(to_insert)
+                .await
+                .map_err(|e| DriveError::Boooooo(format!("boooOOOOO! {e}")))?; // TODO
         }
 
         log::warn!("init: got commit?");
@@ -155,7 +174,7 @@ where
             .block_store
             .walk_batch(walker, n)
             .await
-            .map_err(DriveError::Boooooo)?;
+            .map_err(|e| DriveError::Boooooo(format!("booo! {e}")))?; // TODO
         self.walker = walker;
 
         let processed = batch

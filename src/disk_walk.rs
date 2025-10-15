@@ -17,8 +17,6 @@ pub enum Trip {
     RkeyError(#[from] RkeyError),
     #[error("Process failed: {0}")]
     ProcessFailed(String),
-    #[error("Encountered an rkey out of order while walking the MST")]
-    RkeyOutOfOrder,
 }
 
 /// Errors from invalid Rkeys
@@ -28,6 +26,10 @@ pub enum RkeyError {
     EntryPrefixOutOfbounds,
     #[error("RKey was not utf-8")]
     EntryRkeyNotUtf8(#[from] std::string::FromUtf8Error),
+    #[error("Encountered an rkey out of order while walking the MST")]
+    RkeyOutOfOrder,
+    #[error("Failed to decode commit block: {0}")]
+    BlockDecodeError(#[from] serde_ipld_dagcbor::DecodeError<Infallible>),
 }
 
 /// Walker outputs
@@ -110,24 +112,24 @@ impl Walker {
         }
     }
 
-    pub fn next_needed(&mut self) -> Option<Need> {
-        self.stack.pop()
-        // TODO:
-        // let need = self.stack.pop()?;
-        // if let Need::Record { ref rkey, .. } = need {
-        //     // rkeys *must* be in order or else the tree is invalid (or
-        //     // we have a bug)
-        //     if *rkey <= self.prev {
-        //         return Err(Trip::RkeyOutOfOrder);
-        //     }
-        //     self.prev = rkey.clone();
-        // }
-        // Some(need)
+    pub fn next_needed(&mut self) -> Result<Option<Need>, RkeyError> {
+        let Some(need) = self.stack.pop() else {
+            return Ok(None);
+        };
+        if let Need::Record { ref rkey, .. } = need {
+            // rkeys *must* be in order or else the tree is invalid (or
+            // we have a bug)
+            if *rkey <= self.prev {
+                return Err(RkeyError::RkeyOutOfOrder);
+            }
+            self.prev = rkey.clone();
+        }
+        Ok(Some(need))
     }
 
     /// hacky: this must be called after next_needed if it was a node
-    pub fn handle_node(&mut self, block: &[u8]) -> Result<(), Trip> {
-        let node = serde_ipld_dagcbor::from_slice::<Node>(block).map_err(Trip::BadCommit)?;
+    pub fn handle_node(&mut self, block: &[u8]) -> Result<(), RkeyError> {
+        let node = serde_ipld_dagcbor::from_slice::<Node>(block)?;
         push_from_node(&mut self.stack, &node)?;
         Ok(())
     }
