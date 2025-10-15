@@ -3,7 +3,7 @@ use futures::TryStreamExt;
 use std::collections::VecDeque;
 use std::error::Error;
 
-use crate::disk_walk::{Step, Trip, Walker};
+use crate::disk_walk::{Trip, Walker};
 use crate::mst::Commit;
 
 use ipld_core::cid::Cid;
@@ -11,7 +11,7 @@ use serde::{Serialize, de::DeserializeOwned};
 
 /// Errors that can happen while consuming and emitting blocks and records
 #[derive(Debug, thiserror::Error)]
-pub enum DriveError {
+pub enum DriveError<E: Error> {
     #[error("Failed to initialize CarReader: {0}")]
     CarReader(#[from] iroh_car::Error),
     #[error("Car block stream error: {0}")]
@@ -24,11 +24,33 @@ pub enum DriveError {
     MissingBlock(Cid),
     #[error("Failed to walk the mst tree: {0}")]
     Tripped(#[from] Trip),
+    #[error("whatever: {0}")]
+    WalkingProblem(#[from] WalkError),
+    #[error("whatever: {0}")]
+    Boooooo(String),
+    #[error("processing error: {0}")]
+    ProcessingError(E),
 }
 
+/// Limited subset of errors that can happen while walking
+#[derive(Debug, thiserror::Error)]
+pub enum WalkError {
+    #[error("The MST block {0} could not be found")]
+    MissingBlock(Cid),
+    #[error("Failed to walk the mst tree: {0}")]
+    Tripped(#[from] Trip),
+}
+
+/// Storage backend for caching large-repo blocks
+///
+/// Since
 pub trait BlockStore<MPB: Serialize + DeserializeOwned> {
-    fn put_batch(&self, blocks: Vec<(Cid, MPB)>) -> impl std::future::Future<Output = ()> + Send; // unwraps for now
-    fn get(&self, key: Cid) -> Option<MPB>;
+    fn put_batch(&self, blocks: Vec<(Cid, MPB)>) -> impl Future<Output = ()> + Send; // unwraps for now
+    fn walk_batch(
+        &self,
+        walker: Walker,
+        n: usize,
+    ) -> impl Future<Output = Result<(Walker, Vec<(String, MPB)>), String>>; // boo string error for now because
 }
 
 type CarBlock<E> = Result<(Cid, Vec<u8>), E>;
@@ -54,10 +76,10 @@ where
 impl<SE, S, T, BS, P, PE> Vehicle<SE, S, T, BS, P, PE>
 where
     SE: Error + 'static,
-    S: Stream<Item = CarBlock<SE>> + Unpin,
-    T: Clone + Serialize + DeserializeOwned,
-    BS: BlockStore<Vec<u8>>,
-    P: Fn(&[u8]) -> Result<T, PE>,
+    S: Stream<Item = CarBlock<SE>> + Unpin + Send,
+    T: Clone + Serialize + DeserializeOwned + Send,
+    BS: BlockStore<Vec<u8>> + Send,
+    P: Fn(&[u8]) -> Result<T, PE> + Send,
     PE: Error,
 {
     /// Set up the stream
@@ -82,7 +104,7 @@ where
         block_stream: S,
         block_store: BS,
         process: P,
-    ) -> Result<(Commit, Self), DriveError> {
+    ) -> Result<(Commit, Self), DriveError<PE>> {
         let mut commit = None;
 
         log::warn!("init: load blocks");
@@ -127,16 +149,22 @@ where
         Ok((commit, me))
     }
 
-    async fn load_chunk(&mut self, n: usize) -> Result<(), DriveError> {
-        self.out_cache.reserve(n);
-        for _ in 0..n {
-            let item = match self.walker.step(&mut self.block_store, &self.process)? {
-                Step::Step { rkey, data } => (rkey, data),
-                Step::Finish => break,
-                Step::Rest(cid) => return Err(DriveError::MissingBlock(cid)),
-            };
-            self.out_cache.push_back(item);
-        }
+    async fn load_chunk(&mut self, n: usize) -> Result<(), DriveError<PE>> {
+        let walker = std::mem::take(&mut self.walker);
+        let (walker, batch) = self
+            .block_store
+            .walk_batch(walker, n)
+            .await
+            .map_err(DriveError::Boooooo)?;
+        self.walker = walker;
+
+        let processed = batch
+            .into_iter()
+            .map(|(k, raw)| (self.process)(&raw).map(|t| (k, t)))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(DriveError::ProcessingError)?;
+
+        self.out_cache.extend(processed);
         Ok(())
     }
 
@@ -146,7 +174,7 @@ where
     /// (but non-zero), even if it's not the last chunk.
     ///
     /// an empty vec will be returned to signal the end.
-    pub async fn next_chunk(&mut self, n: usize) -> Result<Vec<(String, T)>, DriveError> {
+    pub async fn next_chunk(&mut self, n: usize) -> Result<Vec<(String, T)>, DriveError<PE>> {
         if self.out_cache.is_empty() {
             self.load_chunk(n).await?;
         }
@@ -154,7 +182,7 @@ where
     }
 
     /// Manually step through the record outputs
-    pub async fn next_record(&mut self) -> Result<Option<(String, T)>, DriveError> {
+    pub async fn next_record(&mut self) -> Result<Option<(String, T)>, DriveError<PE>> {
         if self.out_cache.is_empty() {
             self.load_chunk(64).await?; // TODO
         }
@@ -162,7 +190,7 @@ where
     }
 
     /// Convert to a futures::stream of record outputs
-    pub fn stream(self) -> impl Stream<Item = Result<(String, T), DriveError>> {
+    pub fn stream(self) -> impl Stream<Item = Result<(String, T), DriveError<PE>>> {
         futures::stream::try_unfold(self, |mut this| async move {
             let maybe_record = this.next_record().await?;
             Ok(maybe_record.map(|b| (b, this)))

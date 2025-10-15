@@ -27,7 +27,7 @@ async fn main() -> Result<()> {
 
     let reader = CarReader::new(reader).await?;
 
-    let redb_store = repo_stream::disk_redb::RedbStore::new(tmpfile)?;
+    let redb_store = repo_stream::disk_redb::RedbStore::new(tmpfile).await?;
 
     let root = reader
         .header()

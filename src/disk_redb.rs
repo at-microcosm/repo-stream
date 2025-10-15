@@ -1,4 +1,5 @@
 use crate::disk_drive::BlockStore;
+use crate::disk_walk::{Need, Walker};
 use ipld_core::cid::Cid;
 use redb::{Database, Durability, Error, ReadableDatabase, TableDefinition};
 use std::path::Path;
@@ -12,9 +13,11 @@ pub struct RedbStore {
 }
 
 impl RedbStore {
-    pub fn new(path: impl AsRef<Path>) -> Result<Self, Error> {
+    pub async fn new(path: impl AsRef<Path> + 'static + Send) -> Result<Self, Error> {
         log::warn!("redb new");
-        let db = Database::create(path)?;
+        let db = tokio::task::spawn_blocking(|| Database::create(path))
+            .await
+            .unwrap()?;
         log::warn!("db created");
         Ok(Self { db: db.into() })
     }
@@ -50,11 +53,42 @@ impl BlockStore<Vec<u8>> for RedbStore {
         .unwrap();
     }
 
-    fn get(&self, c: Cid) -> Option<Vec<u8>> {
-        let key_bytes = c.to_bytes();
-        let tx = self.db.begin_read().unwrap();
-        let table = tx.open_table(TABLE).unwrap();
-        let t = table.get(&*key_bytes).unwrap()?.value().to_vec();
-        Some(t)
+    async fn walk_batch(
+        &self,
+        mut walker: Walker,
+        n: usize,
+    ) -> Result<(Walker, Vec<(String, Vec<u8>)>), String> {
+        let db = self.db.clone();
+        tokio::task::spawn_blocking(move || {
+            let tx = db.begin_read().unwrap();
+            let table = tx.open_table(TABLE).unwrap();
+
+            let mut out = Vec::with_capacity(n);
+            loop {
+                let Some(need) = walker.next_needed() else {
+                    break;
+                };
+                let cid = need.cid();
+                let Some(res) = table.get(&*cid.to_bytes()).unwrap() else {
+                    return Err(format!("missing block: {cid:?}"));
+                };
+                let block = res.value();
+
+                match need {
+                    Need::Node(_) => walker
+                        .handle_node(block)
+                        .map_err(|e| format!("failed to handle mst node: {e}"))?,
+                    Need::Record { rkey, .. } => {
+                        out.push((rkey, block.to_vec()));
+                        if out.len() >= n {
+                            break;
+                        }
+                    }
+                }
+            }
+            Ok((walker, out))
+        })
+        .await
+        .unwrap() // tokio join
     }
 }

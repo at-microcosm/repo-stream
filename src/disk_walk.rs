@@ -1,11 +1,10 @@
 //! Depth-first MST traversal
 
-use crate::disk_drive::BlockStore;
 use crate::mst::Node;
+use std::convert::Infallible;
 
 use ipld_core::cid::Cid;
 use serde::{Serialize, de::DeserializeOwned};
-use std::error::Error;
 
 /// Errors that can happen while walking
 #[derive(Debug, thiserror::Error)]
@@ -13,7 +12,7 @@ pub enum Trip {
     #[error("empty mst nodes are not allowed")]
     NodeEmpty,
     #[error("Failed to decode commit block: {0}")]
-    BadCommit(Box<dyn std::error::Error>),
+    BadCommit(serde_ipld_dagcbor::DecodeError<Infallible>),
     #[error("Action node error: {0}")]
     RkeyError(#[from] RkeyError),
     #[error("Process failed: {0}")]
@@ -45,9 +44,18 @@ pub enum Step<T: Serialize + DeserializeOwned> {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-enum Need {
+pub enum Need {
     Node(Cid),
     Record { rkey: String, cid: Cid },
+}
+
+impl Need {
+    pub fn cid(&self) -> Cid {
+        match self {
+            Need::Node(cid) => *cid,
+            Need::Record { cid, .. } => *cid,
+        }
+    }
 }
 
 fn push_from_node(stack: &mut Vec<Need>, node: &Node) -> Result<(), RkeyError> {
@@ -84,7 +92,11 @@ fn push_from_node(stack: &mut Vec<Need>, node: &Node) -> Result<(), RkeyError> {
 /// Traverser of an atproto MST
 ///
 /// Walks the tree from left-to-right in depth-first order
-#[derive(Debug)]
+///
+/// (turning into more of a navigator)
+/// it doesn't quite feel like the divisions of responsibility are right around
+/// here yet.
+#[derive(Debug, Default)]
 pub struct Walker {
     stack: Vec<Need>,
     prev: String,
@@ -98,63 +110,26 @@ impl Walker {
         }
     }
 
-    /// Advance through nodes until we find a record or can't go further
-    pub fn step<T: Clone + Serialize + DeserializeOwned, E: Error>(
-        &mut self,
-        block_store: &mut impl BlockStore<Vec<u8>>,
-        process: impl Fn(&[u8]) -> Result<T, E>,
-    ) -> Result<Step<T>, Trip> {
-        loop {
-            let Some(mut need) = self.stack.last() else {
-                log::trace!("tried to walk but we're actually done.");
-                return Ok(Step::Finish);
-            };
+    pub fn next_needed(&mut self) -> Option<Need> {
+        self.stack.pop()
+        // TODO:
+        // let need = self.stack.pop()?;
+        // if let Need::Record { ref rkey, .. } = need {
+        //     // rkeys *must* be in order or else the tree is invalid (or
+        //     // we have a bug)
+        //     if *rkey <= self.prev {
+        //         return Err(Trip::RkeyOutOfOrder);
+        //     }
+        //     self.prev = rkey.clone();
+        // }
+        // Some(need)
+    }
 
-            match &mut need {
-                Need::Node(cid) => {
-                    log::trace!("need node {cid:?}");
-                    let Some(block) = block_store.get(*cid) else {
-                        log::trace!("node not found, resting");
-                        return Ok(Step::Rest(*cid));
-                    };
-
-                    let node = serde_ipld_dagcbor::from_slice::<Node>(&block)
-                        .map_err(|e| Trip::BadCommit(e.into()))?;
-
-                    // found node, make sure we remember
-                    self.stack.pop();
-
-                    // queue up work on the found node next
-                    push_from_node(&mut self.stack, &node)?;
-                }
-                Need::Record { rkey, cid } => {
-                    log::trace!("need record {cid:?}");
-                    let Some(block) = block_store.get(*cid) else {
-                        log::trace!("record block not found, resting");
-                        return Ok(Step::Rest(*cid));
-                    };
-                    let rkey = rkey.clone();
-
-                    let data = process(&block).map_err(|e| Trip::ProcessFailed(e.to_string()));
-
-                    // found node, make sure we remember
-                    self.stack.pop();
-
-                    log::trace!("emitting a block as a step. depth={}", self.stack.len());
-
-                    let data = data.map_err(|e| Trip::ProcessFailed(e.to_string()))?;
-
-                    // rkeys *must* be in order or else the tree is invalid (or
-                    // we have a bug)
-                    if rkey <= self.prev {
-                        return Err(Trip::RkeyOutOfOrder);
-                    }
-                    self.prev = rkey.clone();
-
-                    return Ok(Step::Step { rkey, data });
-                }
-            }
-        }
+    /// hacky: this must be called after next_needed if it was a node
+    pub fn handle_node(&mut self, block: &[u8]) -> Result<(), Trip> {
+        let node = serde_ipld_dagcbor::from_slice::<Node>(block).map_err(Trip::BadCommit)?;
+        push_from_node(&mut self.stack, &node)?;
+        Ok(())
     }
 }
 
