@@ -1,8 +1,8 @@
 extern crate repo_stream;
 use clap::Parser;
-use futures::TryStreamExt;
-use iroh_car::CarReader;
-use std::convert::Infallible;
+use repo_stream::disk::SqliteStore;
+use repo_stream::drive::Processable;
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -15,6 +15,11 @@ struct Args {
     tmpfile: PathBuf,
 }
 
+#[derive(Clone, Serialize, Deserialize)]
+struct S(usize);
+
+impl Processable for S {}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     env_logger::init();
@@ -23,34 +28,29 @@ async fn main() -> Result<()> {
     let reader = tokio::fs::File::open(car).await?;
     let reader = tokio::io::BufReader::new(reader);
 
+    let mut driver =
+        match repo_stream::drive::load_car(reader, |block| S(block.len()), 1024).await? {
+            repo_stream::drive::Vehicle::Lil(_, _) => panic!("try this on a bigger car"),
+            repo_stream::drive::Vehicle::Big(big_stuff) => {
+                let disk_store = SqliteStore::new(tmpfile);
+                let (commit, driver) = big_stuff.finish_loading(disk_store).await?;
+                log::warn!("big: {:?}", commit);
+                driver
+            }
+        };
+
     println!("hello!");
 
-    let reader = CarReader::new(reader).await?;
-
-    let redb_store = repo_stream::disk_redb::RedbStore::new(tmpfile).await?;
-
-    let root = reader
-        .header()
-        .roots()
-        .first()
-        .ok_or("missing root")?
-        .clone();
-    log::debug!("root: {root:?}");
-
-    // let stream = Box::pin(reader.stream());
-    let stream = std::pin::pin!(reader.stream());
-
-    let (commit, v) =
-        repo_stream::disk_drive::Vehicle::init(root, stream, redb_store, |block| block.len())
-            .await?;
-    let mut record_stream = std::pin::pin!(v.stream());
-
-    log::info!("got commit: {commit:?}");
-
-    while let Some((rkey, _rec)) = record_stream.try_next().await? {
-        log::info!("got {rkey:?}");
+    let mut n = 0;
+    loop {
+        let (d, Some(pairs)) = driver.next_chunk(256).await? else {
+            break;
+        };
+        driver = d;
+        n += pairs.len();
+        // log::info!("got {rkey:?}");
     }
-    log::info!("bye!");
+    log::info!("bye! {n}");
 
     Ok(())
 }

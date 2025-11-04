@@ -1,24 +1,36 @@
 //! Depth-first MST traversal
 
-use crate::drive::MaybeProcessedBlock;
+use crate::disk::{DiskReader, StorageErrorBase};
+use crate::drive::{MaybeProcessedBlock, Processable};
 use crate::mst::Node;
 use ipld_core::cid::Cid;
 use std::collections::HashMap;
-use std::error::Error;
+use std::convert::Infallible;
 
 /// Errors that can happen while walking
 #[derive(Debug, thiserror::Error)]
-pub enum Trip<E: Error> {
+pub enum Trip {
     #[error("empty mst nodes are not allowed")]
     NodeEmpty,
+    #[error("Failed to fingerprint commit block")]
+    BadCommitFingerprint,
     #[error("Failed to decode commit block: {0}")]
-    BadCommit(Box<dyn std::error::Error>),
+    BadCommit(#[from] serde_ipld_dagcbor::DecodeError<Infallible>),
     #[error("Action node error: {0}")]
     RkeyError(#[from] RkeyError),
-    #[error("Process failed: {0}")]
-    ProcessFailed(E),
     #[error("Encountered an rkey out of order while walking the MST")]
     RkeyOutOfOrder,
+}
+
+/// Errors that can happen while walking
+#[derive(Debug, thiserror::Error)]
+pub enum DiskTrip<E: StorageErrorBase> {
+    #[error("tripped: {0}")]
+    Trip(#[from] Trip),
+    #[error("storage error: {0}")]
+    StorageError(#[from] E),
+    #[error("Decode error: {0}")]
+    BincodeDecodeError(#[from] bincode::error::DecodeError),
 }
 
 /// Errors from invalid Rkeys
@@ -33,10 +45,8 @@ pub enum RkeyError {
 /// Walker outputs
 #[derive(Debug)]
 pub enum Step<T> {
-    /// We need a CID but it's not in the block store
-    ///
-    /// Give the needed CID to the driver so it can load blocks until it's found
-    Rest(Cid),
+    /// We needed this CID but it's not in the block store
+    Missing(Cid),
     /// Reached the end of the MST! yay!
     Finish,
     /// A record was found!
@@ -98,11 +108,11 @@ impl Walker {
     }
 
     /// Advance through nodes until we find a record or can't go further
-    pub fn step<T: Clone, E: Error>(
+    pub fn step<T: Processable>(
         &mut self,
-        blocks: &mut HashMap<Cid, MaybeProcessedBlock<T, E>>,
-        process: impl Fn(&[u8]) -> Result<T, E>,
-    ) -> Result<Step<T>, Trip<E>> {
+        blocks: &mut HashMap<Cid, MaybeProcessedBlock<T>>,
+        process: impl Fn(&[u8]) -> T,
+    ) -> Result<Step<T>, Trip> {
         loop {
             let Some(mut need) = self.stack.last() else {
                 log::trace!("tried to walk but we're actually done.");
@@ -114,14 +124,14 @@ impl Walker {
                     log::trace!("need node {cid:?}");
                     let Some(block) = blocks.remove(cid) else {
                         log::trace!("node not found, resting");
-                        return Ok(Step::Rest(*cid));
+                        return Ok(Step::Missing(*cid));
                     };
 
                     let MaybeProcessedBlock::Raw(data) = block else {
-                        return Err(Trip::BadCommit("failed commit fingerprint".into()));
+                        return Err(Trip::BadCommitFingerprint);
                     };
-                    let node = serde_ipld_dagcbor::from_slice::<Node>(&data)
-                        .map_err(|e| Trip::BadCommit(e.into()))?;
+                    let node =
+                        serde_ipld_dagcbor::from_slice::<Node>(&data).map_err(Trip::BadCommit)?;
 
                     // found node, make sure we remember
                     self.stack.pop();
@@ -133,34 +143,90 @@ impl Walker {
                     log::trace!("need record {cid:?}");
                     let Some(data) = blocks.get_mut(cid) else {
                         log::trace!("record block not found, resting");
-                        return Ok(Step::Rest(*cid));
+                        return Ok(Step::Missing(*cid));
                     };
                     let rkey = rkey.clone();
                     let data = match data {
                         MaybeProcessedBlock::Raw(data) => process(data),
-                        MaybeProcessedBlock::Processed(Ok(t)) => Ok(t.clone()),
-                        bad => {
-                            // big hack to pull the error out -- this corrupts
-                            // a block, so we should not continue trying to work
-                            let mut steal = MaybeProcessedBlock::Raw(vec![]);
-                            std::mem::swap(&mut steal, bad);
-                            let MaybeProcessedBlock::Processed(Err(e)) = steal else {
-                                unreachable!();
-                            };
-                            return Err(Trip::ProcessFailed(e));
-                        }
+                        MaybeProcessedBlock::Processed(t) => t.clone(),
                     };
 
                     // found node, make sure we remember
                     self.stack.pop();
 
                     log::trace!("emitting a block as a step. depth={}", self.stack.len());
-                    let data = data.map_err(Trip::ProcessFailed)?;
 
                     // rkeys *must* be in order or else the tree is invalid (or
                     // we have a bug)
                     if rkey <= self.prev {
                         return Err(Trip::RkeyOutOfOrder);
+                    }
+                    self.prev = rkey.clone();
+
+                    return Ok(Step::Step { rkey, data });
+                }
+            }
+        }
+    }
+
+    /// blocking!!!!!!
+    pub fn disk_step<T: Processable, R: DiskReader>(
+        &mut self,
+        reader: &mut R,
+        process: impl Fn(&[u8]) -> T,
+    ) -> Result<Step<T>, DiskTrip<R::StorageError>> {
+        loop {
+            let Some(mut need) = self.stack.last() else {
+                log::trace!("tried to walk but we're actually done.");
+                return Ok(Step::Finish);
+            };
+
+            match &mut need {
+                Need::Node(cid) => {
+                    let cid_bytes = cid.to_bytes();
+                    log::trace!("need node {cid:?}");
+                    let Some(block_bytes) = reader.get(cid_bytes)? else {
+                        log::trace!("node not found, resting");
+                        return Ok(Step::Missing(*cid));
+                    };
+
+                    let block: MaybeProcessedBlock<T> = crate::drive::decode(&block_bytes)?;
+
+                    let MaybeProcessedBlock::Raw(data) = block else {
+                        return Err(Trip::BadCommitFingerprint.into());
+                    };
+                    let node =
+                        serde_ipld_dagcbor::from_slice::<Node>(&data).map_err(Trip::BadCommit)?;
+
+                    // found node, make sure we remember
+                    self.stack.pop();
+
+                    // queue up work on the found node next
+                    push_from_node(&mut self.stack, &node).map_err(Trip::RkeyError)?;
+                }
+                Need::Record { rkey, cid } => {
+                    log::trace!("need record {cid:?}");
+                    let cid_bytes = cid.to_bytes();
+                    let Some(data_bytes) = reader.get(cid_bytes)? else {
+                        log::trace!("record block not found, resting");
+                        return Ok(Step::Missing(*cid));
+                    };
+                    let data: MaybeProcessedBlock<T> = crate::drive::decode(&data_bytes)?;
+                    let rkey = rkey.clone();
+                    let data = match data {
+                        MaybeProcessedBlock::Raw(data) => process(&data),
+                        MaybeProcessedBlock::Processed(t) => t.clone(),
+                    };
+
+                    // found node, make sure we remember
+                    self.stack.pop();
+
+                    log::trace!("emitting a block as a step. depth={}", self.stack.len());
+
+                    // rkeys *must* be in order or else the tree is invalid (or
+                    // we have a bug)
+                    if rkey <= self.prev {
+                        return Err(DiskTrip::Trip(Trip::RkeyOutOfOrder));
                     }
                     self.prev = rkey.clone();
 

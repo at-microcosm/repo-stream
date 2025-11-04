@@ -1,34 +1,66 @@
 //! Consume an MST block stream, producing an ordered stream of records
 
-use futures::{Stream, TryStreamExt};
+use crate::disk::{DiskAccess, DiskStore, DiskWriter, StorageErrorBase};
 use ipld_core::cid::Cid;
+use iroh_car::CarReader;
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::error::Error;
+use std::convert::Infallible;
+use tokio::io::AsyncRead;
 
 use crate::mst::{Commit, Node};
-use crate::walk::{Step, Trip, Walker};
+use crate::walk::{DiskTrip, Step, Trip, Walker};
 
 /// Errors that can happen while consuming and emitting blocks and records
 #[derive(Debug, thiserror::Error)]
-pub enum DriveError<E: Error> {
-    #[error("Failed to initialize CarReader: {0}")]
+pub enum DriveError {
+    #[error("Error from iroh_car: {0}")]
     CarReader(#[from] iroh_car::Error),
-    #[error("Car block stream error: {0}")]
-    CarBlockError(Box<dyn Error>),
     #[error("Failed to decode commit block: {0}")]
-    BadCommit(Box<dyn Error>),
+    BadBlock(#[from] serde_ipld_dagcbor::DecodeError<Infallible>),
     #[error("The Commit block reference by the root was not found")]
     MissingCommit,
     #[error("The MST block {0} could not be found")]
     MissingBlock(Cid),
     #[error("Failed to walk the mst tree: {0}")]
-    Tripped(#[from] Trip<E>),
+    Tripped(#[from] Trip),
+    #[error("CAR file had no roots")]
+    MissingRoot,
 }
 
-type CarBlock<E> = Result<(Cid, Vec<u8>), E>;
+#[derive(Debug, thiserror::Error)]
+pub enum DiskDriveError<E: StorageErrorBase> {
+    #[error("Error from iroh_car: {0}")]
+    CarReader(#[from] iroh_car::Error),
+    #[error("Failed to decode commit block: {0}")]
+    BadBlock(#[from] serde_ipld_dagcbor::DecodeError<Infallible>),
+    #[error("Storage error")]
+    StorageError(#[from] E),
+    #[error("The Commit block reference by the root was not found")]
+    MissingCommit,
+    #[error("The MST block {0} could not be found")]
+    MissingBlock(Cid),
+    #[error("Encode error: {0}")]
+    BincodeEncodeError(#[from] bincode::error::EncodeError),
+    #[error("Decode error: {0}")]
+    BincodeDecodeError(#[from] bincode::error::DecodeError),
+    #[error("disk tripped: {0}")]
+    DiskTripped(#[from] DiskTrip<E>),
+}
 
-#[derive(Debug)]
-pub enum MaybeProcessedBlock<T, E> {
+// #[derive(Debug, thiserror::Error)]
+// pub enum Boooooo<E: StorageErrorBase> {
+//     #[error("disk tripped: {0}")]
+//     DiskTripped(#[from] DiskTrip<E>),
+//     #[error("dde whatever: {0}")]
+//     DiskDriveError(#[from] DiskDriveError<E>),
+// }
+
+pub trait Processable: Clone + Serialize + DeserializeOwned {}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum MaybeProcessedBlock<T> {
     /// A block that's *probably* a Node (but we can't know yet)
     ///
     /// It *can be* a record that suspiciously looks a lot like a node, so we
@@ -50,135 +82,275 @@ pub enum MaybeProcessedBlock<T, E> {
     /// There's an alternative here, which would be to kick unprocessable blocks
     /// back to Raw, or maybe even a new RawUnprocessable variant. Then we could
     /// surface the typed error later if needed by trying to reprocess.
-    Processed(Result<T, E>),
+    Processed(T),
 }
 
-/// The core driver between the block stream and MST walker
-pub struct Vehicle<SE, S, T, P, PE>
-where
-    S: Stream<Item = CarBlock<SE>>,
-    P: Fn(&[u8]) -> Result<T, PE>,
-    PE: Error,
-{
-    block_stream: S,
-    blocks: HashMap<Cid, MaybeProcessedBlock<T, PE>>,
-    walker: Walker,
-    process: P,
+impl<T: Processable> Processable for MaybeProcessedBlock<T> {}
+
+pub enum Vehicle<R: AsyncRead + Unpin, T: Processable> {
+    Lil(Commit, MemDriver<T>),
+    Big(BigCar<R, T>),
 }
 
-impl<SE, S, T: Clone, P, PE> Vehicle<SE, S, T, P, PE>
-where
-    SE: Error + 'static,
-    S: Stream<Item = CarBlock<SE>> + Unpin,
-    P: Fn(&[u8]) -> Result<T, PE>,
-    PE: Error,
-{
-    /// Set up the stream
-    ///
-    /// This will eagerly consume blocks until the `Commit` object is found.
-    /// *Usually* the it's the first block, but there is no guarantee.
-    ///
-    /// ### Parameters
-    ///
-    /// `root`: CID of the commit object that is the root of the MST
-    ///
-    /// `block_stream`: Input stream of raw CAR blocks
-    ///
-    /// `process`: record-transforming callback:
-    ///
-    /// For tasks where records can be quickly processed into a *smaller*
-    /// useful representation, you can do that eagerly as blocks come in by
-    /// passing the processor as a callback here. This can reduce overall
-    /// memory usage.
-    pub async fn init(
-        root: Cid,
-        mut block_stream: S,
-        process: P,
-    ) -> Result<(Commit, Self), DriveError<PE>> {
-        let mut blocks = HashMap::new();
+pub async fn load_car<R: AsyncRead + Unpin, T: Processable>(
+    reader: R,
+    process: fn(&[u8]) -> T,
+    max_size: usize,
+) -> Result<Vehicle<R, T>, DriveError> {
+    let mut mem_blocks = HashMap::new();
 
-        let mut commit = None;
+    let mut car = CarReader::new(reader).await?;
 
-        while let Some((cid, data)) = block_stream
-            .try_next()
-            .await
-            .map_err(|e| DriveError::CarBlockError(e.into()))?
-        {
-            if cid == root {
-                let c: Commit = serde_ipld_dagcbor::from_slice(&data)
-                    .map_err(|e| DriveError::BadCommit(e.into()))?;
-                commit = Some(c);
-                break;
-            } else {
-                blocks.insert(
-                    cid,
-                    if Node::could_be(&data) {
-                        MaybeProcessedBlock::Raw(data)
-                    } else {
-                        MaybeProcessedBlock::Processed(process(&data))
-                    },
-                );
-            }
+    let root = *car
+        .header()
+        .roots()
+        .first()
+        .ok_or(DriveError::MissingRoot)?;
+    log::debug!("root: {root:?}");
+
+    let mut commit = None;
+
+    // try to load all the blocks into memory
+    while let Some((cid, data)) = car.next_block().await? {
+        // the root commit is a Special Third Kind of block that we need to make
+        // sure not to optimistically send to the processing function
+        if cid == root {
+            let c: Commit = serde_ipld_dagcbor::from_slice(&data)?;
+            commit = Some(c);
+            continue;
         }
 
-        // we either broke out or read all the blocks without finding the commit...
-        let commit = commit.ok_or(DriveError::MissingCommit)?;
-
-        let walker = Walker::new(commit.data);
-
-        let me = Self {
-            block_stream,
-            blocks,
-            walker,
-            process,
+        // remaining possible types: node, record, other. optimistically process
+        // TODO: get the actual in-memory size to compute disk spill
+        let maybe_processed = if Node::could_be(&data) {
+            MaybeProcessedBlock::Raw(data)
+        } else {
+            MaybeProcessedBlock::Processed(process(&data))
         };
-        Ok((commit, me))
+
+        // stash (maybe processed) blocks in memory as long as we have room
+        mem_blocks.insert(cid, maybe_processed);
+        if mem_blocks.len() >= max_size {
+            return Ok(Vehicle::Big(BigCar {
+                car,
+                root,
+                process,
+                max_size,
+                mem_blocks,
+                commit,
+            }));
+        }
     }
 
-    async fn drive_until(&mut self, cid_needed: Cid) -> Result<(), DriveError<PE>> {
-        while let Some((cid, data)) = self
-            .block_stream
-            .try_next()
-            .await
-            .map_err(|e| DriveError::CarBlockError(e.into()))?
-        {
-            self.blocks.insert(
-                cid,
-                if Node::could_be(&data) {
+    // all blocks loaded and we fit in memory! hopefully we found the commit...
+    let commit = commit.ok_or(DriveError::MissingCommit)?;
+
+    let walker = Walker::new(commit.data);
+
+    Ok(Vehicle::Lil(
+        commit,
+        MemDriver {
+            blocks: mem_blocks,
+            walker,
+            process,
+        },
+    ))
+}
+
+/// a paritally memory-loaded car file that needs disk spillover to continue
+pub struct BigCar<R: AsyncRead + Unpin, T: Processable> {
+    car: CarReader<R>,
+    root: Cid,
+    process: fn(&[u8]) -> T,
+    max_size: usize,
+    mem_blocks: HashMap<Cid, MaybeProcessedBlock<T>>,
+    pub commit: Option<Commit>,
+}
+
+fn encode(v: impl Serialize) -> Result<Vec<u8>, bincode::error::EncodeError> {
+    bincode::serde::encode_to_vec(v, bincode::config::standard())
+}
+
+pub fn decode<T: Processable>(bytes: &[u8]) -> Result<T, bincode::error::DecodeError> {
+    let (t, n) = bincode::serde::decode_from_slice(bytes, bincode::config::standard())?;
+    assert_eq!(n, bytes.len(), "expected to decode all bytes"); // TODO
+    Ok(t)
+}
+
+impl<R: AsyncRead + Unpin, T: Processable + Send + 'static> BigCar<R, T> {
+    pub async fn finish_loading<S: DiskStore>(
+        mut self,
+        mut store: S,
+    ) -> Result<(Commit, BigCarReady<T, S::Access>), DiskDriveError<S::StorageError>>
+    where
+        S::Access: Send + 'static,
+        S::StorageError: 'static,
+    {
+        // set up access for real
+        let mut access = store.get_access().await?;
+
+        // move access in and back out so we can manage lifetimes
+        // dump mem blocks into the store
+        access = tokio::task::spawn(async move {
+            let mut writer = access.get_writer()?;
+            for (k, v) in self.mem_blocks {
+                let key_bytes = k.to_bytes();
+                let val_bytes = encode(v)?; // TODO
+                writer.put(key_bytes, val_bytes)?;
+            }
+            drop(writer); // cannot outlive access
+            Ok::<_, DiskDriveError<S::StorageError>>(access)
+        })
+        .await
+        .unwrap()?;
+
+        // dump the rest to disk (in chunks)
+        loop {
+            let mut chunk = vec![];
+            loop {
+                let Some((cid, data)) = self.car.next_block().await? else {
+                    break;
+                };
+                // we still gotta keep checking for the root since we might not have it
+                if cid == self.root {
+                    let c: Commit = serde_ipld_dagcbor::from_slice(&data)?;
+                    self.commit = Some(c);
+                    continue;
+                }
+                // remaining possible types: node, record, other. optimistically process
+                // TODO: get the actual in-memory size to compute disk spill
+                let maybe_processed = if Node::could_be(&data) {
                     MaybeProcessedBlock::Raw(data)
                 } else {
                     MaybeProcessedBlock::Processed((self.process)(&data))
-                },
-            );
-            if cid == cid_needed {
-                return Ok(());
+                };
+                chunk.push((cid, maybe_processed));
+                if chunk.len() >= self.max_size {
+                    // eventually this won't be .len()
+                    break;
+                }
             }
+            if chunk.is_empty() {
+                break;
+            }
+
+            // move access in and back out so we can manage lifetimes
+            // dump mem blocks into the store
+            access = tokio::task::spawn_blocking(move || {
+                let mut writer = access.get_writer()?;
+                for (k, v) in chunk {
+                    let key_bytes = k.to_bytes();
+                    let val_bytes = encode(v)?; // TODO
+                    writer.put(key_bytes, val_bytes)?;
+                }
+                drop(writer); // cannot outlive access
+                Ok::<_, DiskDriveError<S::StorageError>>(access)
+            })
+            .await
+            .unwrap()?; // TODO
         }
 
-        // if we never found the block
-        Err(DriveError::MissingBlock(cid_needed))
+        let commit = self.commit.ok_or(DiskDriveError::MissingCommit)?;
+
+        let walker = Walker::new(commit.data);
+
+        Ok((
+            commit,
+            BigCarReady {
+                process: self.process,
+                access,
+                walker,
+            },
+        ))
     }
+}
 
-    /// Manually step through the record outputs
-    pub async fn next_record(&mut self) -> Result<Option<(String, T)>, DriveError<PE>> {
-        loop {
-            // walk as far as we can until we run out of blocks or find a record
-            let cid_needed = match self.walker.step(&mut self.blocks, &self.process)? {
-                Step::Rest(cid) => cid,
-                Step::Finish => return Ok(None),
-                Step::Step { rkey, data } => return Ok(Some((rkey, data))),
-            };
+pub struct BigCarReady<T: Clone, A: DiskAccess> {
+    process: fn(&[u8]) -> T,
+    access: A,
+    walker: Walker,
+}
 
-            // load blocks until we reach that cid
-            self.drive_until(cid_needed).await?;
-        }
-    }
+impl<T: Processable + Send + 'static, A: DiskAccess + Send + 'static> BigCarReady<T, A> {
+    pub async fn next_chunk(
+        mut self,
+        n: usize,
+    ) -> Result<(Self, Option<Vec<(String, T)>>), DiskDriveError<A::StorageError>>
+    where
+        A::StorageError: Send,
+    {
+        let mut out = Vec::with_capacity(n);
+        (self, out) = tokio::task::spawn_blocking(move || {
+            let access = self.access;
+            let mut reader = access.get_reader()?;
 
-    /// Convert to a futures::stream of record outputs
-    pub fn stream(self) -> impl Stream<Item = Result<(String, T), DriveError<PE>>> {
-        futures::stream::try_unfold(self, |mut this| async move {
-            let maybe_record = this.next_record().await?;
-            Ok(maybe_record.map(|b| (b, this)))
+            for _ in 0..n {
+                // walk as far as we can until we run out of blocks or find a record
+                match self.walker.disk_step(&mut reader, self.process)? {
+                    Step::Missing(cid) => return Err(DiskDriveError::MissingBlock(cid)),
+                    Step::Finish => break,
+                    Step::Step { rkey, data } => {
+                        out.push((rkey, data));
+                        continue;
+                    }
+                };
+            }
+
+            drop(reader); // cannot outlive access
+            self.access = access;
+            Ok::<_, DiskDriveError<A::StorageError>>((self, out))
         })
+        .await
+        .unwrap()?; // TODO
+
+        if out.is_empty() {
+            Ok((self, None))
+        } else {
+            Ok((self, Some(out)))
+        }
+    }
+}
+
+/// The core driver between the block stream and MST walker
+///
+/// In the future, PDSs will export CARs in a stream-friendly order that will
+/// enable processing them with tiny memory overhead. But that future is not
+/// here yet.
+///
+/// CARs are almost always in a stream-unfriendly order, so I'm reverting the
+/// optimistic stream features: we load all block first, then walk the MST.
+///
+/// This makes things much simpler: we only need to worry about spilling to disk
+/// in one place, and we always have a reasonable expecatation about how much
+/// work the init function will do. We can drop the CAR reader before walking,
+/// so the sync/async boundaries become a little easier to work around.
+#[derive(Debug)]
+pub struct MemDriver<T: Processable> {
+    blocks: HashMap<Cid, MaybeProcessedBlock<T>>,
+    walker: Walker,
+    process: fn(&[u8]) -> T,
+}
+
+impl<T: Processable> MemDriver<T> {
+    /// Manually step through the record outputs
+    pub async fn next_chunk(&mut self, n: usize) -> Result<Option<Vec<(String, T)>>, DriveError> {
+        let mut out = Vec::with_capacity(n);
+        for _ in 0..n {
+            // walk as far as we can until we run out of blocks or find a record
+            match self.walker.step(&mut self.blocks, self.process)? {
+                Step::Missing(cid) => return Err(DriveError::MissingBlock(cid)),
+                Step::Finish => break,
+                Step::Step { rkey, data } => {
+                    out.push((rkey, data));
+                    continue;
+                }
+            };
+        }
+
+        if out.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(out))
+        }
     }
 }

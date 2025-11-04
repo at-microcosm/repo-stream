@@ -1,8 +1,5 @@
 extern crate repo_stream;
 use clap::Parser;
-use futures::TryStreamExt;
-use iroh_car::CarReader;
-use std::convert::Infallible;
 use std::path::PathBuf;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -21,32 +18,20 @@ async fn main() -> Result<()> {
     let reader = tokio::fs::File::open(file).await?;
     let reader = tokio::io::BufReader::new(reader);
 
-    println!("hello!");
-
-    let reader = CarReader::new(reader).await?;
-
-    let root = reader
-        .header()
-        .roots()
-        .first()
-        .ok_or("missing root")?
-        .clone();
-    log::debug!("root: {root:?}");
-
-    // let stream = Box::pin(reader.stream());
-    let stream = std::pin::pin!(reader.stream());
-
-    let (commit, v) =
-        repo_stream::drive::Vehicle::init(root, stream, |block| Ok::<_, Infallible>(block.len()))
-            .await?;
-    let mut record_stream = std::pin::pin!(v.stream());
+    let (commit, mut driver) =
+        match repo_stream::drive::load_car(reader, |block| block.len(), 1024 * 1024).await? {
+            repo_stream::drive::Vehicle::Lil(commit, mem_driver) => (commit, mem_driver),
+            repo_stream::drive::Vehicle::Big(_) => panic!("can't handle big cars yet"),
+        };
 
     log::info!("got commit: {commit:?}");
 
-    while let Some((rkey, _rec)) = record_stream.try_next().await? {
-        log::info!("got {rkey:?}");
+    let mut n = 0;
+    while let Some(pairs) = driver.next_chunk(256).await? {
+        n += pairs.len();
+        // log::info!("got {rkey:?}");
     }
-    log::info!("bye!");
+    log::info!("bye! {n}");
 
     Ok(())
 }
