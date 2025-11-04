@@ -1,3 +1,4 @@
+use redb::ReadableDatabase;
 use rusqlite::OptionalExtension;
 use std::error::Error;
 use std::path::PathBuf;
@@ -36,7 +37,7 @@ pub trait DiskReader {
     fn get(&mut self, key: Vec<u8>) -> Result<Option<Vec<u8>>, Self::StorageError>;
 }
 
-/////////////////
+///////////////// sqlite
 
 pub struct SqliteStore {
     path: PathBuf,
@@ -122,40 +123,84 @@ impl DiskReader for SqliteReader<'_> {
     }
 }
 
-// /// The main storage interface for MST blocks
-// ///
-// /// **Note**: `get` and `put` are **synchronous methods that may block**
-// pub trait BlockStore<T: Clone> {
-//     fn get(&self, cid: Cid) -> Option<MaybeProcessedBlock<T>>;
-//     fn put(&mut self, cid: Cid, mpb: MaybeProcessedBlock<T>);
-// }
+//////////// redb why not
 
-// ///// wheee
+const REDB_TABLE: redb::TableDefinition<&[u8], &[u8]> = redb::TableDefinition::new("blocks");
 
-// /// In-memory MST block storage
-// ///
-// /// a thin wrapper around a hashmap
-// pub struct MemoryStore<T: Clone> {
-//     map: HashMap<Cid, MaybeProcessedBlock<T>>,
-// }
+pub struct RedbStore {
+    path: PathBuf,
+}
 
-// impl<T: Clone> BlockStore<T> for MemoryStore<T> {
-//     fn get(&self, cid: Cid) -> Option<MaybeProcessedBlock<T>> {
-//         self.map.get(&cid).map(|t| t.clone())
-//     }
-//     fn put(&mut self, cid: Cid, mpb: MaybeProcessedBlock<T>) {
-//         self.map.insert(cid, mpb);
-//     }
-// }
+impl RedbStore {
+    pub fn new(path: PathBuf) -> Self {
+        Self { path }
+    }
+}
 
-// //// the fun bits
+impl StorageErrorBase for redb::Error {}
 
-// pub struct HybridStore<T: Clone, D: DiskStore> {
-//     mem: MemoryStore<T>,
-//     disk: D,
-// }
+impl DiskStore for RedbStore {
+    type StorageError = redb::Error;
+    type Access = RedbAccess;
+    async fn get_access(&mut self) -> Result<RedbAccess, redb::Error> {
+        let path = self.path.clone();
+        let db = tokio::task::spawn_blocking(move || {
+            let db = redb::Database::create(path)?;
+            Ok::<_, Self::StorageError>(db)
+        })
+        .await
+        .expect("join error")?;
 
-// impl<T: Clone, D: DiskStore> BlockStore<T> for HybridStore<T, D> {
-//     fn get(&self, _cid: Cid) -> Option<MaybeProcessedBlock<T>> { todo!() }
-//     fn put(&mut self, _cid: Cid, _mpb: MaybeProcessedBlock<T>) { todo!() }
-// }
+        Ok(RedbAccess { db })
+    }
+}
+
+pub struct RedbAccess {
+    db: redb::Database,
+}
+
+impl DiskAccess for RedbAccess {
+    type StorageError = redb::Error;
+    fn get_writer(&mut self) -> Result<impl DiskWriter<redb::Error>, redb::Error> {
+        let mut tx = self.db.begin_write()?;
+        tx.set_durability(redb::Durability::None)?;
+        Ok(RedbWriter { tx: Some(tx) })
+    }
+    fn get_reader(&self) -> Result<impl DiskReader<StorageError = redb::Error>, redb::Error> {
+        let tx = self.db.begin_read()?;
+        Ok(RedbReader { tx })
+    }
+}
+
+pub struct RedbWriter {
+    tx: Option<redb::WriteTransaction>,
+}
+
+impl DiskWriter<redb::Error> for RedbWriter {
+    fn put(&mut self, key: Vec<u8>, val: Vec<u8>) -> Result<(), redb::Error> {
+        let mut table = self.tx.as_ref().unwrap().open_table(REDB_TABLE)?;
+        table.insert(&*key, &*val)?;
+        Ok(())
+    }
+}
+
+/// oops careful in async
+impl Drop for RedbWriter {
+    fn drop(&mut self) {
+        let tx = self.tx.take();
+        tx.unwrap().commit().unwrap();
+    }
+}
+
+pub struct RedbReader {
+    tx: redb::ReadTransaction,
+}
+
+impl DiskReader for RedbReader {
+    type StorageError = redb::Error;
+    fn get(&mut self, key: Vec<u8>) -> Result<Option<Vec<u8>>, redb::Error> {
+        let table = self.tx.open_table(REDB_TABLE)?;
+        let rv = table.get(&*key)?.map(|guard| guard.value().to_vec());
+        Ok(rv)
+    }
+}

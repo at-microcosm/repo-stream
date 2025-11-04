@@ -1,6 +1,6 @@
 extern crate repo_stream;
 use clap::Parser;
-use repo_stream::disk::SqliteStore;
+use repo_stream::disk::RedbStore;
 use repo_stream::drive::Processable;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -32,7 +32,7 @@ async fn main() -> Result<()> {
         match repo_stream::drive::load_car(reader, |block| S(block.len()), 1024).await? {
             repo_stream::drive::Vehicle::Lil(_, _) => panic!("try this on a bigger car"),
             repo_stream::drive::Vehicle::Big(big_stuff) => {
-                let disk_store = SqliteStore::new(tmpfile);
+                let disk_store = RedbStore::new(tmpfile);
                 let (commit, driver) = big_stuff.finish_loading(disk_store).await?;
                 log::warn!("big: {:?}", commit);
                 driver
