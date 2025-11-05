@@ -111,7 +111,7 @@ impl Walker {
     pub fn step<T: Processable>(
         &mut self,
         blocks: &mut HashMap<Cid, MaybeProcessedBlock<T>>,
-        process: impl Fn(&[u8]) -> T,
+        process: impl Fn(Vec<u8>) -> T,
     ) -> Result<Step<T>, Trip> {
         loop {
             let Some(mut need) = self.stack.last() else {
@@ -147,7 +147,7 @@ impl Walker {
                     };
                     let rkey = rkey.clone();
                     let data = match data {
-                        MaybeProcessedBlock::Raw(data) => process(data),
+                        MaybeProcessedBlock::Raw(data) => process(data.to_vec()),
                         MaybeProcessedBlock::Processed(t) => t.clone(),
                     };
 
@@ -173,7 +173,7 @@ impl Walker {
     pub fn disk_step<T: Processable, R: DiskReader>(
         &mut self,
         reader: &mut R,
-        process: impl Fn(&[u8]) -> T,
+        process: impl Fn(Vec<u8>) -> T,
     ) -> Result<Step<T>, DiskTrip<R::StorageError>> {
         loop {
             let Some(mut need) = self.stack.last() else {
@@ -214,7 +214,7 @@ impl Walker {
                     let data: MaybeProcessedBlock<T> = crate::drive::decode(&data_bytes)?;
                     let rkey = rkey.clone();
                     let data = match data {
-                        MaybeProcessedBlock::Raw(data) => process(&data),
+                        MaybeProcessedBlock::Raw(data) => process(data),
                         MaybeProcessedBlock::Processed(t) => t.clone(),
                     };
 

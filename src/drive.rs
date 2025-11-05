@@ -112,7 +112,7 @@ pub enum Vehicle<R: AsyncRead + Unpin, T: Processable> {
 
 pub async fn load_car<R: AsyncRead + Unpin, T: Processable>(
     reader: R,
-    process: fn(&[u8]) -> T,
+    process: fn(Vec<u8>) -> T,
     max_size: usize,
 ) -> Result<Vehicle<R, T>, DriveError> {
     let mut mem_blocks = HashMap::new();
@@ -144,7 +144,7 @@ pub async fn load_car<R: AsyncRead + Unpin, T: Processable>(
         let maybe_processed = if Node::could_be(&data) {
             MaybeProcessedBlock::Raw(data)
         } else {
-            MaybeProcessedBlock::Processed(process(&data))
+            MaybeProcessedBlock::Processed(process(data))
         };
 
         // stash (maybe processed) blocks in memory as long as we have room
@@ -181,7 +181,7 @@ pub async fn load_car<R: AsyncRead + Unpin, T: Processable>(
 pub struct BigCar<R: AsyncRead + Unpin, T: Processable> {
     car: CarReader<R>,
     root: Cid,
-    process: fn(&[u8]) -> T,
+    process: fn(Vec<u8>) -> T,
     max_size: usize,
     mem_blocks: HashMap<Cid, MaybeProcessedBlock<T>>,
     pub commit: Option<Commit>,
@@ -243,7 +243,7 @@ impl<R: AsyncRead + Unpin, T: Processable + Send + 'static> BigCar<R, T> {
                 let maybe_processed = if Node::could_be(&data) {
                     MaybeProcessedBlock::Raw(data)
                 } else {
-                    MaybeProcessedBlock::Processed((self.process)(&data))
+                    MaybeProcessedBlock::Processed((self.process)(data))
                 };
                 mem_size += std::mem::size_of::<Cid>() + maybe_processed.get_size();
                 chunk.push((cid, maybe_processed));
@@ -287,7 +287,7 @@ impl<R: AsyncRead + Unpin, T: Processable + Send + 'static> BigCar<R, T> {
 }
 
 pub struct BigCarReady<T: Clone, A: DiskAccess> {
-    process: fn(&[u8]) -> T,
+    process: fn(Vec<u8>) -> T,
     access: A,
     walker: Walker,
 }
@@ -349,7 +349,7 @@ impl<T: Processable + Send + 'static, A: DiskAccess + Send + 'static> BigCarRead
 pub struct MemDriver<T: Processable> {
     blocks: HashMap<Cid, MaybeProcessedBlock<T>>,
     walker: Walker,
-    process: fn(&[u8]) -> T,
+    process: fn(Vec<u8>) -> T,
 }
 
 impl<T: Processable> MemDriver<T> {
