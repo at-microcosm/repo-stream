@@ -61,7 +61,7 @@ impl DiskStore for SqliteStore {
 
             conn.pragma_update(None, "journal_mode", "WAL")?;
             conn.pragma_update(None, "synchronous", "OFF")?;
-            conn.pragma_update(None, "cache_size", (-32 * 2_i64.pow(10)).to_string())?;
+            conn.pragma_update(None, "cache_size", (-4 * 2_i64.pow(10)).to_string())?;
             conn.execute(
                 "CREATE TABLE blocks (
                     key  BLOB PRIMARY KEY NOT NULL,
@@ -144,8 +144,11 @@ impl DiskStore for RedbStore {
     type Access = RedbAccess;
     async fn get_access(&mut self) -> Result<RedbAccess, redb::Error> {
         let path = self.path.clone();
+        let kb = 2_usize.pow(10);
         let db = tokio::task::spawn_blocking(move || {
-            let db = redb::Database::create(path)?;
+            let db = redb::Database::builder()
+                .set_cache_size(16 * kb)
+                .create(path)?;
             Ok::<_, Self::StorageError>(db)
         })
         .await
@@ -204,3 +207,5 @@ impl DiskReader for RedbReader {
         Ok(rv)
     }
 }
+
+///// TODO: that other single file db thing to try

@@ -1,6 +1,5 @@
 extern crate repo_stream;
 use clap::Parser;
-use repo_stream::disk::RedbStore;
 use repo_stream::drive::Processable;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -18,7 +17,11 @@ struct Args {
 #[derive(Clone, Serialize, Deserialize)]
 struct S(usize);
 
-impl Processable for S {}
+impl Processable for S {
+    fn get_size(&self) -> usize {
+        0 // no additional space taken, just its stack size (newtype is free)
+    }
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -28,11 +31,15 @@ async fn main() -> Result<()> {
     let reader = tokio::fs::File::open(car).await?;
     let reader = tokio::io::BufReader::new(reader);
 
+    // let kb = 2_usize.pow(10);
+    let mb = 2_usize.pow(20);
+
     let mut driver =
-        match repo_stream::drive::load_car(reader, |block| S(block.len()), 1024).await? {
+        match repo_stream::drive::load_car(reader, |block| S(block.len()), 16 * mb).await? {
             repo_stream::drive::Vehicle::Lil(_, _) => panic!("try this on a bigger car"),
             repo_stream::drive::Vehicle::Big(big_stuff) => {
-                let disk_store = RedbStore::new(tmpfile);
+                // let disk_store = repo_stream::disk::SqliteStore::new(tmpfile);
+                let disk_store = repo_stream::disk::RedbStore::new(tmpfile);
                 let (commit, driver) = big_stuff.finish_loading(disk_store).await?;
                 log::warn!("big: {:?}", commit);
                 driver

@@ -34,6 +34,9 @@ tokio = { version = "1.47.1", features = ["full"] }
 inherits = "release"
 debug = true
 
+[profile.release]
+debug = true
+
 [[bench]]
 name = "non-huge-cars"
 harness = false

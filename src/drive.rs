@@ -57,7 +57,10 @@ pub enum DiskDriveError<E: StorageErrorBase> {
 //     DiskDriveError(#[from] DiskDriveError<E>),
 // }
 
-pub trait Processable: Clone + Serialize + DeserializeOwned {}
+pub trait Processable: Clone + Serialize + DeserializeOwned {
+    /// the additional size taken up (not including its mem::size_of)
+    fn get_size(&self) -> usize;
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum MaybeProcessedBlock<T> {
@@ -85,7 +88,22 @@ pub enum MaybeProcessedBlock<T> {
     Processed(T),
 }
 
-impl<T: Processable> Processable for MaybeProcessedBlock<T> {}
+impl<T: Processable> Processable for MaybeProcessedBlock<T> {
+    /// TODO this is probably a little broken
+    fn get_size(&self) -> usize {
+        use std::{cmp::max, mem::size_of};
+
+        // enum is always as big as its biggest member?
+        let base_size = max(size_of::<Vec<u8>>(), size_of::<T>());
+
+        let extra = match self {
+            Self::Raw(bytes) => bytes.len(),
+            Self::Processed(t) => t.get_size(),
+        };
+
+        base_size + extra
+    }
+}
 
 pub enum Vehicle<R: AsyncRead + Unpin, T: Processable> {
     Lil(Commit, MemDriver<T>),
@@ -111,6 +129,7 @@ pub async fn load_car<R: AsyncRead + Unpin, T: Processable>(
     let mut commit = None;
 
     // try to load all the blocks into memory
+    let mut mem_size = 0;
     while let Some((cid, data)) = car.next_block().await? {
         // the root commit is a Special Third Kind of block that we need to make
         // sure not to optimistically send to the processing function
@@ -129,8 +148,9 @@ pub async fn load_car<R: AsyncRead + Unpin, T: Processable>(
         };
 
         // stash (maybe processed) blocks in memory as long as we have room
+        mem_size += std::mem::size_of::<Cid>() + maybe_processed.get_size();
         mem_blocks.insert(cid, maybe_processed);
-        if mem_blocks.len() >= max_size {
+        if mem_size >= max_size {
             return Ok(Vehicle::Big(BigCar {
                 car,
                 root,
@@ -207,6 +227,7 @@ impl<R: AsyncRead + Unpin, T: Processable + Send + 'static> BigCar<R, T> {
         // dump the rest to disk (in chunks)
         loop {
             let mut chunk = vec![];
+            let mut mem_size = 0;
             loop {
                 let Some((cid, data)) = self.car.next_block().await? else {
                     break;
@@ -224,9 +245,9 @@ impl<R: AsyncRead + Unpin, T: Processable + Send + 'static> BigCar<R, T> {
                 } else {
                     MaybeProcessedBlock::Processed((self.process)(&data))
                 };
+                mem_size += std::mem::size_of::<Cid>() + maybe_processed.get_size();
                 chunk.push((cid, maybe_processed));
-                if chunk.len() >= self.max_size {
-                    // eventually this won't be .len()
+                if mem_size >= self.max_size {
                     break;
                 }
             }
