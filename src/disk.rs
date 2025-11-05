@@ -208,4 +208,83 @@ impl DiskReader for RedbReader {
     }
 }
 
-///// TODO: that other single file db thing to try
+///// rustcask??
+
+pub struct RustcaskStore {
+    path: PathBuf,
+}
+
+impl RustcaskStore {
+    pub fn new(path: PathBuf) -> Self {
+        Self { path }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum CaskError {
+    #[error(transparent)]
+    OpenError(#[from] rustcask::error::OpenError),
+    #[error(transparent)]
+    SetError(#[from] rustcask::error::SetError),
+    #[error("failed to get key: {0}")]
+    GetError(String),
+    #[error("failed to ensure directory: {0}")]
+    EnsureDirError(std::io::Error),
+}
+
+impl StorageErrorBase for CaskError {}
+
+impl DiskStore for RustcaskStore {
+    type StorageError = CaskError;
+    type Access = RustcaskAccess;
+    async fn get_access(&mut self) -> Result<RustcaskAccess, CaskError> {
+        let path = self.path.clone();
+        let db = tokio::task::spawn_blocking(move || {
+            std::fs::create_dir_all(&path).map_err(CaskError::EnsureDirError)?;
+            let db = rustcask::Rustcask::builder().open(&path)?;
+            Ok::<_, Self::StorageError>(db)
+        })
+        .await
+        .expect("join error")?;
+
+        Ok(RustcaskAccess { db })
+    }
+}
+
+pub struct RustcaskAccess {
+    db: rustcask::Rustcask,
+}
+
+impl DiskAccess for RustcaskAccess {
+    type StorageError = CaskError;
+    fn get_writer(&mut self) -> Result<impl DiskWriter<CaskError>, CaskError> {
+        Ok(RustcaskWriter { db: self.db.clone() })
+    }
+    fn get_reader(&self) -> Result<impl DiskReader<StorageError = CaskError>, CaskError> {
+        Ok(RustcaskReader { db: self.db.clone() })
+    }
+}
+
+pub struct RustcaskWriter {
+    db: rustcask::Rustcask,
+}
+
+impl DiskWriter<CaskError> for RustcaskWriter {
+    fn put(&mut self, key: Vec<u8>, val: Vec<u8>) -> Result<(), CaskError> {
+        self.db.set(key, val)?;
+        Ok(())
+    }
+}
+
+pub struct RustcaskReader {
+    db: rustcask::Rustcask,
+}
+
+impl DiskReader for RustcaskReader {
+    type StorageError = CaskError;
+    fn get(&mut self, key: Vec<u8>) -> Result<Option<Vec<u8>>, CaskError> {
+        self.db
+            .get(&key)
+            .map_err(|e| CaskError::GetError(e.to_string()))
+    }
+}

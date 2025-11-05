@@ -49,14 +49,6 @@ pub enum DiskDriveError<E: StorageErrorBase> {
     DiskTripped(#[from] DiskTrip<E>),
 }
 
-// #[derive(Debug, thiserror::Error)]
-// pub enum Boooooo<E: StorageErrorBase> {
-//     #[error("disk tripped: {0}")]
-//     DiskTripped(#[from] DiskTrip<E>),
-//     #[error("dde whatever: {0}")]
-//     DiskDriveError(#[from] DiskDriveError<E>),
-// }
-
 pub trait Processable: Clone + Serialize + DeserializeOwned {
     /// the additional size taken up (not including its mem::size_of)
     fn get_size(&self) -> usize;

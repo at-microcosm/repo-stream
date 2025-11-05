@@ -35,11 +35,12 @@ async fn main() -> Result<()> {
     let mb = 2_usize.pow(20);
 
     let mut driver =
-        match repo_stream::drive::load_car(reader, |block| S(block.len()), 16 * mb).await? {
+        match repo_stream::drive::load_car(reader, |block| S(block.len()), 1 * mb).await? {
             repo_stream::drive::Vehicle::Lil(_, _) => panic!("try this on a bigger car"),
             repo_stream::drive::Vehicle::Big(big_stuff) => {
                 // let disk_store = repo_stream::disk::SqliteStore::new(tmpfile);
-                let disk_store = repo_stream::disk::RedbStore::new(tmpfile);
+                // let disk_store = repo_stream::disk::RedbStore::new(tmpfile);
+                let disk_store = repo_stream::disk::RustcaskStore::new(tmpfile);
                 let (commit, driver) = big_stuff.finish_loading(disk_store).await?;
                 log::warn!("big: {:?}", commit);
                 driver
