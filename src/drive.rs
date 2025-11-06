@@ -215,10 +215,27 @@ impl<R: AsyncRead + Unpin, T: Processable + Send + 'static> BigCar<R, T> {
         .await
         .unwrap()?;
 
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<(Cid, MaybeProcessedBlock<T>)>>(2);
+
+        let access_worker = tokio::task::spawn_blocking(move || {
+            let mut writer = access.get_writer()?;
+
+            while let Some(chunk) = rx.blocking_recv() {
+                let kvs = chunk
+                    .into_iter()
+                    .map(|(k, v)| (k.to_bytes(), encode(v).unwrap()));
+                writer.put_many(kvs)?;
+            }
+
+            drop(writer); // cannot outlive access
+            Ok::<_, DiskDriveError>(access)
+        }); // await later
+
         // dump the rest to disk (in chunks)
+        log::debug!("dumping the rest of the stream...");
         loop {
-            let mut chunk = vec![];
             let mut mem_size = 0;
+            let mut chunk = vec![];
             loop {
                 let Some((cid, data)) = self.car.next_block().await? else {
                     break;
@@ -239,30 +256,23 @@ impl<R: AsyncRead + Unpin, T: Processable + Send + 'static> BigCar<R, T> {
                 mem_size += std::mem::size_of::<Cid>() + maybe_processed.get_size();
                 chunk.push((cid, maybe_processed));
                 if mem_size >= self.max_size {
+                    // soooooo if we're setting the db cache to max_size and then letting
+                    // multiple chunks in the queue that are >= max_size, then at any time
+                    // we might be using some multiple of max_size?
                     break;
                 }
             }
             if chunk.is_empty() {
                 break;
             }
-
-            // move access in and back out so we can manage lifetimes
-            // dump mem blocks into the store
-            access = tokio::task::spawn_blocking(move || {
-                let mut writer = access.get_writer()?;
-
-                let kvs = chunk
-                    .into_iter()
-                    .map(|(k, v)| (k.to_bytes(), encode(v).unwrap()));
-
-                writer.put_many(kvs)?;
-
-                drop(writer); // cannot outlive access
-                Ok::<_, DiskDriveError>(access)
-            })
-            .await
-            .unwrap()?; // TODO
+            tx.send(chunk).await.unwrap();
         }
+        drop(tx);
+        log::debug!("done. waiting for worker to finish...");
+
+        access = access_worker.await.unwrap()?;
+
+        log::debug!("worker finished.");
 
         let commit = self.commit.ok_or(DiskDriveError::MissingCommit)?;
 
