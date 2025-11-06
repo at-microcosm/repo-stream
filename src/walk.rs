@@ -11,23 +11,12 @@ use std::convert::Infallible;
 /// Errors that can happen while walking
 #[derive(Debug, thiserror::Error)]
 pub enum Trip {
-    #[error("empty mst nodes are not allowed")]
-    NodeEmpty,
     #[error("Failed to fingerprint commit block")]
     BadCommitFingerprint,
     #[error("Failed to decode commit block: {0}")]
     BadCommit(#[from] serde_ipld_dagcbor::DecodeError<Infallible>),
     #[error("Action node error: {0}")]
     MstError(#[from] MstError),
-    #[error("Encountered an rkey out of order while walking the MST")]
-    RkeyOutOfOrder,
-}
-
-/// Errors that can happen while walking
-#[derive(Debug, thiserror::Error)]
-pub enum DiskTrip {
-    #[error("tripped: {0}")]
-    Trip(#[from] Trip),
     #[error("storage error: {0}")]
     StorageError(#[from] rusqlite::Error),
     #[error("Decode error: {0}")]
@@ -49,6 +38,8 @@ pub enum MstError {
     LostDepth,
     #[error("MST depth underflow: depth-0 node with child trees")]
     DepthUnderflow,
+    #[error("Encountered an rkey out of order while walking the MST")]
+    RkeyOutOfOrder,
 }
 
 /// Walker outputs
@@ -232,7 +223,7 @@ impl Walker {
                     // rkeys *must* be in order or else the tree is invalid (or
                     // we have a bug)
                     if rkey <= self.prev {
-                        return Err(Trip::RkeyOutOfOrder);
+                        return Err(MstError::RkeyOutOfOrder)?;
                     }
                     self.prev = rkey.clone();
 
@@ -247,7 +238,7 @@ impl Walker {
         &mut self,
         reader: &mut SqliteReader,
         process: impl Fn(Vec<u8>) -> T,
-    ) -> Result<Step<T>, DiskTrip> {
+    ) -> Result<Step<T>, Trip> {
         loop {
             let Some(need) = self.stack.last_mut() else {
                 log::trace!("tried to walk but we're actually done.");
@@ -266,7 +257,7 @@ impl Walker {
                     let block: MaybeProcessedBlock<T> = crate::drive::decode(&block_bytes)?;
 
                     let MaybeProcessedBlock::Raw(data) = block else {
-                        return Err(Trip::BadCommitFingerprint.into());
+                        return Err(Trip::BadCommitFingerprint);
                     };
                     let node =
                         serde_ipld_dagcbor::from_slice::<Node>(&data).map_err(Trip::BadCommit)?;
@@ -299,7 +290,7 @@ impl Walker {
                     // rkeys *must* be in order or else the tree is invalid (or
                     // we have a bug)
                     if rkey <= self.prev {
-                        return Err(DiskTrip::Trip(Trip::RkeyOutOfOrder));
+                        return Err(MstError::RkeyOutOfOrder)?;
                     }
                     self.prev = rkey.clone();
 

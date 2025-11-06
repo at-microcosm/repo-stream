@@ -10,7 +10,7 @@ use std::convert::Infallible;
 use tokio::io::AsyncRead;
 
 use crate::mst::{Commit, Node};
-use crate::walk::{DiskTrip, Step, Trip, Walker};
+use crate::walk::{Step, Trip, Walker};
 
 /// Errors that can happen while consuming and emitting blocks and records
 #[derive(Debug, thiserror::Error)]
@@ -27,26 +27,12 @@ pub enum DriveError {
     Tripped(#[from] Trip),
     #[error("CAR file had no roots")]
     MissingRoot,
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum DiskDriveError {
-    #[error("Error from iroh_car: {0}")]
-    CarReader(#[from] iroh_car::Error),
-    #[error("Failed to decode commit block: {0}")]
-    BadBlock(#[from] serde_ipld_dagcbor::DecodeError<Infallible>),
     #[error("Storage error")]
     StorageError(#[from] rusqlite::Error),
-    #[error("The Commit block reference by the root was not found")]
-    MissingCommit,
-    #[error("The MST block {0} could not be found")]
-    MissingBlock(Cid),
     #[error("Encode error: {0}")]
     BincodeEncodeError(#[from] bincode::error::EncodeError),
     #[error("Decode error: {0}")]
     BincodeDecodeError(#[from] bincode::error::DecodeError),
-    #[error("disk tripped: {0}")]
-    DiskTripped(#[from] DiskTrip),
 }
 
 pub trait Processable: Clone + Serialize + DeserializeOwned {
@@ -193,7 +179,7 @@ impl<R: AsyncRead + Unpin, T: Processable + Send + 'static> BigCar<R, T> {
     pub async fn finish_loading(
         mut self,
         mut store: SqliteStore,
-    ) -> Result<(Commit, BigCarReady<T>), DiskDriveError> {
+    ) -> Result<(Commit, BigCarReady<T>), DriveError> {
         // set up access for real
         let mut access = store.get_access().await?;
 
@@ -210,7 +196,7 @@ impl<R: AsyncRead + Unpin, T: Processable + Send + 'static> BigCar<R, T> {
             writer.put_many(kvs)?;
 
             drop(writer); // cannot outlive access
-            Ok::<_, DiskDriveError>(access)
+            Ok::<_, DriveError>(access)
         })
         .await
         .unwrap()?;
@@ -228,7 +214,7 @@ impl<R: AsyncRead + Unpin, T: Processable + Send + 'static> BigCar<R, T> {
             }
 
             drop(writer); // cannot outlive access
-            Ok::<_, DiskDriveError>(access)
+            Ok::<_, DriveError>(access)
         }); // await later
 
         // dump the rest to disk (in chunks)
@@ -274,7 +260,7 @@ impl<R: AsyncRead + Unpin, T: Processable + Send + 'static> BigCar<R, T> {
 
         log::debug!("worker finished.");
 
-        let commit = self.commit.ok_or(DiskDriveError::MissingCommit)?;
+        let commit = self.commit.ok_or(DriveError::MissingCommit)?;
 
         let walker = Walker::new(commit.data);
 
@@ -299,7 +285,7 @@ impl<T: Processable + Send + 'static> BigCarReady<T> {
     pub async fn next_chunk(
         mut self,
         n: usize,
-    ) -> Result<(Self, Option<Vec<(String, T)>>), DiskDriveError> {
+    ) -> Result<(Self, Option<Vec<(String, T)>>), DriveError> {
         let mut out = Vec::with_capacity(n);
         (self, out) = tokio::task::spawn_blocking(move || {
             let access = self.access;
@@ -308,7 +294,7 @@ impl<T: Processable + Send + 'static> BigCarReady<T> {
             for _ in 0..n {
                 // walk as far as we can until we run out of blocks or find a record
                 match self.walker.disk_step(&mut reader, self.process)? {
-                    Step::Missing(cid) => return Err(DiskDriveError::MissingBlock(cid)),
+                    Step::Missing(cid) => return Err(DriveError::MissingBlock(cid)),
                     Step::Finish => break,
                     Step::Step { rkey, data } => {
                         out.push((rkey, data));
@@ -319,7 +305,7 @@ impl<T: Processable + Send + 'static> BigCarReady<T> {
 
             drop(reader); // cannot outlive access
             self.access = access;
-            Ok::<_, DiskDriveError>((self, out))
+            Ok::<_, DriveError>((self, out))
         })
         .await
         .unwrap()?; // TODO
@@ -337,9 +323,9 @@ impl<T: Processable + Send + 'static> BigCarReady<T> {
     ) -> Result<
         (
             tokio::sync::mpsc::Receiver<Vec<(String, T)>>,
-            tokio::task::JoinHandle<Result<(), DiskDriveError>>,
+            tokio::task::JoinHandle<Result<(), DriveError>>,
         ),
-        DiskDriveError,
+        DriveError,
     > {
         let (tx, rx) = tokio::sync::mpsc::channel::<Vec<(String, T)>>(1);
 
@@ -355,7 +341,7 @@ impl<T: Processable + Send + 'static> BigCarReady<T> {
                 for _ in 0..n {
                     // walk as far as we can until we run out of blocks or find a record
                     match self.walker.disk_step(&mut reader, self.process)? {
-                        Step::Missing(cid) => return Err(DiskDriveError::MissingBlock(cid)),
+                        Step::Missing(cid) => return Err(DriveError::MissingBlock(cid)),
                         Step::Finish => break,
                         Step::Step { rkey, data } => {
                             out.push((rkey, data));
