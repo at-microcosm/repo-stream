@@ -83,10 +83,6 @@ impl Node {
     /// with an empty array of entries. This is the only situation in which a
     /// tree may contain an empty leaf node which does not either contain keys
     /// ("entries") or point to a sub-tree containing entries.
-    ///
-    /// TODO: to me this is slightly unclear with respect to `l` (ask someone).
-    /// ...is that what "The top of the tree must not be a an empty node which
-    /// only points to a sub-tree." is referring to?
     pub fn is_empty(&self) -> bool {
         self.left.is_none() && self.entries.is_empty()
     }

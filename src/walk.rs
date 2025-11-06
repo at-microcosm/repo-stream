@@ -4,6 +4,7 @@ use crate::disk::SqliteReader;
 use crate::drive::{MaybeProcessedBlock, Processable};
 use crate::mst::Node;
 use ipld_core::cid::Cid;
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::convert::Infallible;
 
@@ -17,7 +18,7 @@ pub enum Trip {
     #[error("Failed to decode commit block: {0}")]
     BadCommit(#[from] serde_ipld_dagcbor::DecodeError<Infallible>),
     #[error("Action node error: {0}")]
-    RkeyError(#[from] RkeyError),
+    MstError(#[from] MstError),
     #[error("Encountered an rkey out of order while walking the MST")]
     RkeyOutOfOrder,
 }
@@ -34,12 +35,20 @@ pub enum DiskTrip {
 }
 
 /// Errors from invalid Rkeys
-#[derive(Debug, thiserror::Error)]
-pub enum RkeyError {
+#[derive(Debug, PartialEq, thiserror::Error)]
+pub enum MstError {
     #[error("Failed to compute an rkey due to invalid prefix_len")]
     EntryPrefixOutOfbounds,
     #[error("RKey was not utf-8")]
     EntryRkeyNotUtf8(#[from] std::string::FromUtf8Error),
+    #[error("Nodes cannot be empty (except for an entirely empty MST)")]
+    EmptyNode,
+    #[error("Found an entry with rkey at the wrong depth")]
+    WrongDepth,
+    #[error("Lost track of our depth (possible bug?)")]
+    LostDepth,
+    #[error("MST depth underflow: depth-0 node with child trees")]
+    DepthUnderflow,
 }
 
 /// Walker outputs
@@ -55,21 +64,74 @@ pub enum Step<T> {
 
 #[derive(Debug, Clone, PartialEq)]
 enum Need {
-    Node(Cid),
+    Node { depth: Depth, cid: Cid },
     Record { rkey: String, cid: Cid },
 }
 
-fn push_from_node(stack: &mut Vec<Need>, node: &Node) -> Result<(), RkeyError> {
-    let mut entries = Vec::with_capacity(node.entries.len());
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Depth {
+    Root,
+    Depth(u32),
+}
 
+impl Depth {
+    fn from_key(key: &[u8]) -> Self {
+        let mut zeros = 0;
+        for byte in Sha256::digest(key) {
+            let leading = byte.leading_zeros();
+            zeros += leading;
+            if leading < 8 {
+                break;
+            }
+        }
+        Self::Depth(zeros / 2) // truncating divide (rounds down)
+    }
+    fn next_expected(&self) -> Result<Option<u32>, MstError> {
+        match self {
+            Self::Root => Ok(None),
+            Self::Depth(d) => d.checked_sub(1).ok_or(MstError::DepthUnderflow).map(Some),
+        }
+    }
+}
+
+fn push_from_node(stack: &mut Vec<Need>, node: &Node, parent_depth: Depth) -> Result<(), MstError> {
+    // empty nodes are not allowed in the MST
+    // ...except for a single one for empty MST, but we wouldn't be pushing that
+    if node.is_empty() {
+        return Err(MstError::EmptyNode);
+    }
+
+    let mut entries = Vec::with_capacity(node.entries.len());
     let mut prefix = vec![];
+    let mut this_depth = parent_depth.next_expected()?;
+
     for entry in &node.entries {
         let mut rkey = vec![];
         let pre_checked = prefix
             .get(..entry.prefix_len)
-            .ok_or(RkeyError::EntryPrefixOutOfbounds)?;
+            .ok_or(MstError::EntryPrefixOutOfbounds)?;
         rkey.extend_from_slice(pre_checked);
         rkey.extend_from_slice(&entry.keysuffix);
+
+        let Depth::Depth(key_depth) = Depth::from_key(&rkey) else {
+            return Err(MstError::WrongDepth);
+        };
+
+        // this_depth is `none` if we are the deepest child (directly below root)
+        // in that case we accept whatever highest depth is claimed
+        let expected_depth = match this_depth {
+            Some(d) => d,
+            None => {
+                this_depth = Some(key_depth);
+                key_depth
+            }
+        };
+
+        // all keys we find should be this depth
+        if key_depth != expected_depth {
+            return Err(MstError::DepthUnderflow);
+        }
+
         prefix = rkey.clone();
 
         entries.push(Need::Record {
@@ -77,15 +139,23 @@ fn push_from_node(stack: &mut Vec<Need>, node: &Node) -> Result<(), RkeyError> {
             cid: entry.value,
         });
         if let Some(ref tree) = entry.tree {
-            entries.push(Need::Node(*tree));
+            entries.push(Need::Node {
+                depth: Depth::Depth(key_depth),
+                cid: *tree,
+            });
         }
     }
 
     entries.reverse();
     stack.append(&mut entries);
 
+    let d = this_depth.ok_or(MstError::LostDepth)?;
+
     if let Some(tree) = node.left {
-        stack.push(Need::Node(tree));
+        stack.push(Need::Node {
+            depth: Depth::Depth(d),
+            cid: tree,
+        });
     }
     Ok(())
 }
@@ -102,7 +172,10 @@ pub struct Walker {
 impl Walker {
     pub fn new(tree_root_cid: Cid) -> Self {
         Self {
-            stack: vec![Need::Node(tree_root_cid)],
+            stack: vec![Need::Node {
+                depth: Depth::Root,
+                cid: tree_root_cid,
+            }],
             prev: "".to_string(),
         }
     }
@@ -114,17 +187,17 @@ impl Walker {
         process: impl Fn(Vec<u8>) -> T,
     ) -> Result<Step<T>, Trip> {
         loop {
-            let Some(mut need) = self.stack.last() else {
+            let Some(need) = self.stack.last_mut() else {
                 log::trace!("tried to walk but we're actually done.");
                 return Ok(Step::Finish);
             };
 
-            match &mut need {
-                Need::Node(cid) => {
+            match need {
+                &mut Need::Node { depth, cid } => {
                     log::trace!("need node {cid:?}");
-                    let Some(block) = blocks.remove(cid) else {
+                    let Some(block) = blocks.remove(&cid) else {
                         log::trace!("node not found, resting");
-                        return Ok(Step::Missing(*cid));
+                        return Ok(Step::Missing(cid));
                     };
 
                     let MaybeProcessedBlock::Raw(data) = block else {
@@ -137,7 +210,7 @@ impl Walker {
                     self.stack.pop();
 
                     // queue up work on the found node next
-                    push_from_node(&mut self.stack, &node)?;
+                    push_from_node(&mut self.stack, &node, depth)?;
                 }
                 Need::Record { rkey, cid } => {
                     log::trace!("need record {cid:?}");
@@ -176,18 +249,18 @@ impl Walker {
         process: impl Fn(Vec<u8>) -> T,
     ) -> Result<Step<T>, DiskTrip> {
         loop {
-            let Some(mut need) = self.stack.last() else {
+            let Some(need) = self.stack.last_mut() else {
                 log::trace!("tried to walk but we're actually done.");
                 return Ok(Step::Finish);
             };
 
-            match &mut need {
-                Need::Node(cid) => {
+            match need {
+                &mut Need::Node { depth, cid } => {
                     let cid_bytes = cid.to_bytes();
                     log::trace!("need node {cid:?}");
                     let Some(block_bytes) = reader.get(cid_bytes)? else {
                         log::trace!("node not found, resting");
-                        return Ok(Step::Missing(*cid));
+                        return Ok(Step::Missing(cid));
                     };
 
                     let block: MaybeProcessedBlock<T> = crate::drive::decode(&block_bytes)?;
@@ -202,7 +275,7 @@ impl Walker {
                     self.stack.pop();
 
                     // queue up work on the found node next
-                    push_from_node(&mut self.stack, &node).map_err(Trip::RkeyError)?;
+                    push_from_node(&mut self.stack, &node, depth).map_err(Trip::MstError)?;
                 }
                 Need::Record { rkey, cid } => {
                     log::trace!("need record {cid:?}");
@@ -289,25 +362,93 @@ mod test {
     //     }
 
     #[test]
-    fn test_next_from_node_empty() {
-        let node = Node {
+    fn test_depth_spec_0() {
+        let d = Depth::from_key(b"2653ae71");
+        assert_eq!(d, Depth::Depth(0))
+    }
+
+    #[test]
+    fn test_depth_spec_1() {
+        let d = Depth::from_key(b"blue");
+        assert_eq!(d, Depth::Depth(1))
+    }
+
+    #[test]
+    fn test_depth_spec_4() {
+        let d = Depth::from_key(b"app.bsky.feed.post/454397e440ec");
+        assert_eq!(d, Depth::Depth(4))
+    }
+
+    #[test]
+    fn test_depth_spec_8() {
+        let d = Depth::from_key(b"app.bsky.feed.post/9adeb165882c");
+        assert_eq!(d, Depth::Depth(8))
+    }
+
+    #[test]
+    fn test_depth_ietf_draft_0() {
+        let d = Depth::from_key(b"key1");
+        assert_eq!(d, Depth::Depth(0))
+    }
+
+    #[test]
+    fn test_depth_ietf_draft_1() {
+        let d = Depth::from_key(b"key7");
+        assert_eq!(d, Depth::Depth(1))
+    }
+
+    #[test]
+    fn test_depth_ietf_draft_4() {
+        let d = Depth::from_key(b"key515");
+        assert_eq!(d, Depth::Depth(4))
+    }
+
+    #[test]
+    fn test_depth_interop() {
+        // examples from https://github.com/bluesky-social/atproto-interop-tests/blob/main/mst/key_heights.json
+        for (k, expected) in [
+            ("", 0),
+            ("asdf", 0),
+            ("blue", 1),
+            ("2653ae71", 0),
+            ("88bfafc7", 2),
+            ("2a92d355", 4),
+            ("884976f5", 6),
+            ("app.bsky.feed.post/454397e440ec", 4),
+            ("app.bsky.feed.post/9adeb165882c", 8),
+        ] {
+            let d = Depth::from_key(k.as_bytes());
+            assert_eq!(d, Depth::Depth(expected), "key: {}", k);
+        }
+    }
+
+    #[test]
+    fn test_push_empty_fails() {
+        let empty_node = Node {
             left: None,
             entries: vec![],
         };
         let mut stack = vec![];
-        push_from_node(&mut stack, &node).unwrap();
-        assert_eq!(stack.last(), None);
+        let err = push_from_node(&mut stack, &empty_node, Depth::Depth(4));
+        assert_eq!(err, Err(MstError::EmptyNode));
     }
 
     #[test]
-    fn test_needs_from_node_just_left() {
+    fn test_push_one_node() {
         let node = Node {
             left: Some(cid1()),
             entries: vec![],
         };
         let mut stack = vec![];
-        push_from_node(&mut stack, &node).unwrap();
-        assert_eq!(stack.last(), Some(Need::Node(cid1())).as_ref());
+        push_from_node(&mut stack, &node, Depth::Depth(4)).unwrap();
+        assert_eq!(
+            stack.last(),
+            Some(Need::Node {
+                depth: Depth::Depth(3),
+                cid: cid1()
+            })
+            .as_ref()
+        );
     }
 
     //     #[test]

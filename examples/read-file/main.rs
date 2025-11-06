@@ -1,5 +1,7 @@
 extern crate repo_stream;
 use clap::Parser;
+use repo_stream::drive::Processable;
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -8,6 +10,15 @@ type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 struct Args {
     #[arg()]
     file: PathBuf,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct S(usize);
+
+impl Processable for S {
+    fn get_size(&self) -> usize {
+        0 // no additional space taken, just its stack size (newtype is free)
+    }
 }
 
 #[tokio::main]
@@ -19,7 +30,7 @@ async fn main() -> Result<()> {
     let reader = tokio::io::BufReader::new(reader);
 
     let (commit, mut driver) =
-        match repo_stream::drive::load_car(reader, |block| block.len(), 1024 * 1024).await? {
+        match repo_stream::drive::load_car(reader, |block| S(block.len()), 1024 * 1024).await? {
             repo_stream::drive::Vehicle::Lil(commit, mem_driver) => (commit, mem_driver),
             repo_stream::drive::Vehicle::Big(_) => panic!("can't handle big cars yet"),
         };
