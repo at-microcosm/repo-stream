@@ -30,6 +30,7 @@ pub trait DiskAccess: Send {
 
 pub trait DiskWriter<E: StorageErrorBase> {
     fn put(&mut self, key: Vec<u8>, val: Vec<u8>) -> Result<(), E>;
+    fn put_many(&mut self, _kv: impl Iterator<Item = (Vec<u8>, Vec<u8>)>) -> Result<(), E>;
 }
 
 pub trait DiskReader {
@@ -59,9 +60,13 @@ impl DiskStore for SqliteStore {
         let conn = tokio::task::spawn_blocking(move || {
             let conn = rusqlite::Connection::open(path)?;
 
+            let sq_mb = -(2_i64.pow(10)); // negative is kibibytes for sqlite cache_size
+
+            // conn.pragma_update(None, "journal_mode", "OFF")?;
+            // conn.pragma_update(None, "journal_mode", "MEMORY")?;
             conn.pragma_update(None, "journal_mode", "WAL")?;
             conn.pragma_update(None, "synchronous", "OFF")?;
-            conn.pragma_update(None, "cache_size", (-4 * 2_i64.pow(10)).to_string())?;
+            conn.pragma_update(None, "cache_size", (5 * sq_mb).to_string())?;
             conn.execute(
                 "CREATE TABLE blocks (
                     key  BLOB PRIMARY KEY NOT NULL,
@@ -86,10 +91,9 @@ pub struct SqliteAccess {
 impl DiskAccess for SqliteAccess {
     type StorageError = rusqlite::Error;
     fn get_writer(&mut self) -> Result<impl DiskWriter<rusqlite::Error>, rusqlite::Error> {
-        let insert_stmt = self
-            .conn
-            .prepare("INSERT INTO blocks (key, val) VALUES (?1, ?2)")?;
-        Ok(SqliteWriter { insert_stmt })
+        let tx = self.conn.transaction()?;
+        // let insert_stmt = tx.prepare("INSERT INTO blocks (key, val) VALUES (?1, ?2)")?;
+        Ok(SqliteWriter { tx: Some(tx) })
     }
     fn get_reader(
         &self,
@@ -100,12 +104,30 @@ impl DiskAccess for SqliteAccess {
 }
 
 pub struct SqliteWriter<'conn> {
-    insert_stmt: rusqlite::Statement<'conn>,
+    tx: Option<rusqlite::Transaction<'conn>>,
+}
+
+/// oops careful in async
+impl Drop for SqliteWriter<'_> {
+    fn drop(&mut self) {
+        let tx = self.tx.take();
+        tx.unwrap().commit().unwrap();
+    }
 }
 
 impl DiskWriter<rusqlite::Error> for SqliteWriter<'_> {
     fn put(&mut self, key: Vec<u8>, val: Vec<u8>) -> rusqlite::Result<()> {
-        self.insert_stmt.execute((key, val))?;
+        let tx = self.tx.as_ref().unwrap();
+        let mut insert_stmt = tx.prepare_cached("INSERT INTO blocks (key, val) VALUES (?1, ?2)")?;
+        insert_stmt.execute((key, val))?;
+        Ok(())
+    }
+    fn put_many(&mut self, kv: impl Iterator<Item = (Vec<u8>, Vec<u8>)>) -> rusqlite::Result<()> {
+        let tx = self.tx.as_ref().unwrap();
+        let mut insert_stmt = tx.prepare_cached("INSERT INTO blocks (key, val) VALUES (?1, ?2)")?;
+        for (k, v) in kv {
+            insert_stmt.execute((k, v))?;
+        }
         Ok(())
     }
 }
@@ -144,10 +166,10 @@ impl DiskStore for RedbStore {
     type Access = RedbAccess;
     async fn get_access(&mut self) -> Result<RedbAccess, redb::Error> {
         let path = self.path.clone();
-        let kb = 2_usize.pow(10);
+        let mb = 2_usize.pow(20);
         let db = tokio::task::spawn_blocking(move || {
             let db = redb::Database::builder()
-                .set_cache_size(16 * kb)
+                .set_cache_size(5 * mb)
                 .create(path)?;
             Ok::<_, Self::StorageError>(db)
         })
@@ -183,6 +205,13 @@ impl DiskWriter<redb::Error> for RedbWriter {
     fn put(&mut self, key: Vec<u8>, val: Vec<u8>) -> Result<(), redb::Error> {
         let mut table = self.tx.as_ref().unwrap().open_table(REDB_TABLE)?;
         table.insert(&*key, &*val)?;
+        Ok(())
+    }
+    fn put_many(&mut self, kv: impl Iterator<Item = (Vec<u8>, Vec<u8>)>) -> Result<(), redb::Error> {
+        let mut table = self.tx.as_ref().unwrap().open_table(REDB_TABLE)?;
+        for (k, v) in kv {
+            table.insert(&*k, &*v)?;
+        }
         Ok(())
     }
 }
@@ -274,6 +303,12 @@ impl DiskWriter<CaskError> for RustcaskWriter {
         self.db.set(key, val)?;
         Ok(())
     }
+    fn put_many(&mut self, kv: impl Iterator<Item = (Vec<u8>, Vec<u8>)>) -> Result<(), CaskError> {
+        for (k, v) in kv {
+            self.db.set(k, v)?;
+        }
+        Ok(())
+    }
 }
 
 pub struct RustcaskReader {
@@ -286,5 +321,105 @@ impl DiskReader for RustcaskReader {
         self.db
             .get(&key)
             .map_err(|e| CaskError::GetError(e.to_string()))
+    }
+}
+
+
+///////// heeeeeeeeeeeeed
+
+type HeedBytes = heed::types::SerdeBincode<Vec<u8>>;
+type HeedDb = heed::Database<HeedBytes, HeedBytes>;
+// type HeedDb = heed::Database<Vec<u8>, Vec<u8>>;
+
+pub struct HeedStore {
+    path: PathBuf,
+}
+
+impl HeedStore {
+    pub fn new(path: PathBuf) -> Self {
+        Self { path }
+    }
+}
+
+impl StorageErrorBase for heed::Error {}
+
+impl DiskStore for HeedStore {
+    type StorageError = heed::Error;
+    type Access = HeedAccess;
+    async fn get_access(&mut self) -> Result<HeedAccess, heed::Error> {
+        let path = self.path.clone();
+        let env = tokio::task::spawn_blocking(move || {
+            std::fs::create_dir_all(&path).unwrap();
+            let env = unsafe {
+                heed::EnvOpenOptions::new()
+                    .map_size(1 * 2_usize.pow(30))
+                    .open(path)?
+            };
+            Ok::<_, Self::StorageError>(env)
+        })
+        .await
+        .expect("join error")?;
+
+        Ok(HeedAccess { env, db: None })
+    }
+}
+
+pub struct HeedAccess {
+    env: heed::Env,
+    db: Option<HeedDb>,
+}
+
+impl DiskAccess for HeedAccess {
+    type StorageError = heed::Error;
+    fn get_writer(&mut self) -> Result<impl DiskWriter<heed::Error>, heed::Error> {
+        let mut tx = self.env.write_txn()?;
+        let db = self.env.create_database(&mut tx, None)?;
+        self.db = Some(db.clone());
+        Ok(HeedWriter { tx: Some(tx), db })
+    }
+    fn get_reader(&self) -> Result<impl DiskReader<StorageError = heed::Error>, heed::Error> {
+        let tx = self.env.read_txn()?;
+        let db = self.db.expect("should have called get_writer first");
+        Ok(HeedReader { tx, db })
+    }
+}
+
+pub struct HeedWriter<'tx> {
+    tx: Option<heed::RwTxn<'tx>>,
+    db: HeedDb,
+}
+
+impl DiskWriter<heed::Error> for HeedWriter<'_> {
+    fn put(&mut self, key: Vec<u8>, val: Vec<u8>) -> Result<(), heed::Error> {
+        let mut tx = self.tx.as_mut().unwrap();
+        self.db.put(&mut tx, &key, &val)?;
+        Ok(())
+    }
+    fn put_many(&mut self, kv: impl Iterator<Item = (Vec<u8>, Vec<u8>)>) -> Result<(), heed::Error> {
+        let mut tx = self.tx.as_mut().unwrap();
+        for (k, v) in kv {
+            self.db.put(&mut tx, &k, &v)?;
+        }
+        Ok(())
+    }
+}
+
+/// oops careful in async
+impl Drop for HeedWriter<'_> {
+    fn drop(&mut self) {
+        let tx = self.tx.take();
+        tx.unwrap().commit().unwrap();
+    }
+}
+
+pub struct HeedReader<'tx> {
+    tx: heed::RoTxn<'tx, heed::WithTls>,
+    db: HeedDb,
+}
+
+impl DiskReader for HeedReader<'_> {
+    type StorageError = heed::Error;
+    fn get(&mut self, key: Vec<u8>) -> Result<Option<Vec<u8>>, heed::Error> {
+        self.db.get(&self.tx, &key)
     }
 }

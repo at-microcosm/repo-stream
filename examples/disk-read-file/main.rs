@@ -35,12 +35,13 @@ async fn main() -> Result<()> {
     let mb = 2_usize.pow(20);
 
     let mut driver =
-        match repo_stream::drive::load_car(reader, |block| S(block.len()), 1 * mb).await? {
+        match repo_stream::drive::load_car(reader, |block| S(block.len()), 5 * mb).await? {
             repo_stream::drive::Vehicle::Lil(_, _) => panic!("try this on a bigger car"),
             repo_stream::drive::Vehicle::Big(big_stuff) => {
-                // let disk_store = repo_stream::disk::SqliteStore::new(tmpfile);
-                // let disk_store = repo_stream::disk::RedbStore::new(tmpfile);
-                let disk_store = repo_stream::disk::RustcaskStore::new(tmpfile);
+                let disk_store = repo_stream::disk::SqliteStore::new(tmpfile.clone());
+                // let disk_store = repo_stream::disk::RedbStore::new(tmpfile.clone());
+                // let disk_store = repo_stream::disk::RustcaskStore::new(tmpfile.clone());
+                // let disk_store = repo_stream::disk::HeedStore::new(tmpfile.clone());
                 let (commit, driver) = big_stuff.finish_loading(disk_store).await?;
                 log::warn!("big: {:?}", commit);
                 driver
@@ -51,14 +52,21 @@ async fn main() -> Result<()> {
 
     let mut n = 0;
     loop {
-        let (d, Some(pairs)) = driver.next_chunk(256).await? else {
+        let (d, p) = driver.next_chunk(1024).await?;
+        driver = d;
+        let Some(pairs) = p else {
             break;
         };
-        driver = d;
         n += pairs.len();
         // log::info!("got {rkey:?}");
     }
+    // log::info!("now is the time to check mem...");
+    // tokio::time::sleep(std::time::Duration::from_secs(22)).await;
+    drop(driver);
     log::info!("bye! {n}");
+
+    std::fs::remove_file(tmpfile).unwrap();
+    // std::fs::remove_dir_all(tmpfile).unwrap();
 
     Ok(())
 }

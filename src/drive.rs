@@ -205,11 +205,14 @@ impl<R: AsyncRead + Unpin, T: Processable + Send + 'static> BigCar<R, T> {
         // dump mem blocks into the store
         access = tokio::task::spawn(async move {
             let mut writer = access.get_writer()?;
-            for (k, v) in self.mem_blocks {
-                let key_bytes = k.to_bytes();
-                let val_bytes = encode(v)?; // TODO
-                writer.put(key_bytes, val_bytes)?;
-            }
+
+            let kvs = self
+                .mem_blocks
+                .into_iter()
+                .map(|(k, v)| (k.to_bytes(), encode(v).unwrap()));
+
+            writer.put_many(kvs)?;
+
             drop(writer); // cannot outlive access
             Ok::<_, DiskDriveError<S::StorageError>>(access)
         })
@@ -251,11 +254,13 @@ impl<R: AsyncRead + Unpin, T: Processable + Send + 'static> BigCar<R, T> {
             // dump mem blocks into the store
             access = tokio::task::spawn_blocking(move || {
                 let mut writer = access.get_writer()?;
-                for (k, v) in chunk {
-                    let key_bytes = k.to_bytes();
-                    let val_bytes = encode(v)?; // TODO
-                    writer.put(key_bytes, val_bytes)?;
-                }
+
+                let kvs = chunk
+                    .into_iter()
+                    .map(|(k, v)| (k.to_bytes(), encode(v).unwrap()));
+
+                writer.put_many(kvs)?;
+
                 drop(writer); // cannot outlive access
                 Ok::<_, DiskDriveError<S::StorageError>>(access)
             })
