@@ -42,11 +42,12 @@ pub trait DiskReader {
 
 pub struct SqliteStore {
     path: PathBuf,
+    limit_mb: usize,
 }
 
 impl SqliteStore {
-    pub fn new(path: PathBuf) -> Self {
-        Self { path }
+    pub fn new(path: PathBuf, limit_mb: usize) -> Self {
+        Self { path, limit_mb }
     }
 }
 
@@ -57,6 +58,7 @@ impl DiskStore for SqliteStore {
     type Access = SqliteAccess;
     async fn get_access(&mut self) -> Result<SqliteAccess, rusqlite::Error> {
         let path = self.path.clone();
+        let limit_mb = self.limit_mb;
         let conn = tokio::task::spawn_blocking(move || {
             let conn = rusqlite::Connection::open(path)?;
 
@@ -65,8 +67,9 @@ impl DiskStore for SqliteStore {
             // conn.pragma_update(None, "journal_mode", "OFF")?;
             // conn.pragma_update(None, "journal_mode", "MEMORY")?;
             conn.pragma_update(None, "journal_mode", "WAL")?;
+            // conn.pragma_update(None, "wal_autocheckpoint", "0")?; // this lets things get a bit big on disk
             conn.pragma_update(None, "synchronous", "OFF")?;
-            conn.pragma_update(None, "cache_size", (5 * sq_mb).to_string())?;
+            conn.pragma_update(None, "cache_size", (limit_mb as i64 * sq_mb).to_string())?;
             conn.execute(
                 "CREATE TABLE blocks (
                     key  BLOB PRIMARY KEY NOT NULL,
@@ -151,11 +154,12 @@ const REDB_TABLE: redb::TableDefinition<&[u8], &[u8]> = redb::TableDefinition::n
 
 pub struct RedbStore {
     path: PathBuf,
+    limit_mb: usize,
 }
 
 impl RedbStore {
-    pub fn new(path: PathBuf) -> Self {
-        Self { path }
+    pub fn new(path: PathBuf, limit_mb: usize) -> Self {
+        Self { path, limit_mb }
     }
 }
 
@@ -166,10 +170,11 @@ impl DiskStore for RedbStore {
     type Access = RedbAccess;
     async fn get_access(&mut self) -> Result<RedbAccess, redb::Error> {
         let path = self.path.clone();
+        let limit_mb = self.limit_mb;
         let mb = 2_usize.pow(20);
         let db = tokio::task::spawn_blocking(move || {
             let db = redb::Database::builder()
-                .set_cache_size(5 * mb)
+                .set_cache_size(limit_mb * mb)
                 .create(path)?;
             Ok::<_, Self::StorageError>(db)
         })
@@ -207,7 +212,10 @@ impl DiskWriter<redb::Error> for RedbWriter {
         table.insert(&*key, &*val)?;
         Ok(())
     }
-    fn put_many(&mut self, kv: impl Iterator<Item = (Vec<u8>, Vec<u8>)>) -> Result<(), redb::Error> {
+    fn put_many(
+        &mut self,
+        kv: impl Iterator<Item = (Vec<u8>, Vec<u8>)>,
+    ) -> Result<(), redb::Error> {
         let mut table = self.tx.as_ref().unwrap().open_table(REDB_TABLE)?;
         for (k, v) in kv {
             table.insert(&*k, &*v)?;
@@ -287,10 +295,14 @@ pub struct RustcaskAccess {
 impl DiskAccess for RustcaskAccess {
     type StorageError = CaskError;
     fn get_writer(&mut self) -> Result<impl DiskWriter<CaskError>, CaskError> {
-        Ok(RustcaskWriter { db: self.db.clone() })
+        Ok(RustcaskWriter {
+            db: self.db.clone(),
+        })
     }
     fn get_reader(&self) -> Result<impl DiskReader<StorageError = CaskError>, CaskError> {
-        Ok(RustcaskReader { db: self.db.clone() })
+        Ok(RustcaskReader {
+            db: self.db.clone(),
+        })
     }
 }
 
@@ -324,7 +336,6 @@ impl DiskReader for RustcaskReader {
     }
 }
 
-
 ///////// heeeeeeeeeeeeed
 
 type HeedBytes = heed::types::SerdeBincode<Vec<u8>>;
@@ -352,7 +363,7 @@ impl DiskStore for HeedStore {
             std::fs::create_dir_all(&path).unwrap();
             let env = unsafe {
                 heed::EnvOpenOptions::new()
-                    .map_size(1 * 2_usize.pow(30))
+                    .map_size(2 * 2_usize.pow(30))
                     .open(path)?
             };
             Ok::<_, Self::StorageError>(env)
@@ -374,7 +385,7 @@ impl DiskAccess for HeedAccess {
     fn get_writer(&mut self) -> Result<impl DiskWriter<heed::Error>, heed::Error> {
         let mut tx = self.env.write_txn()?;
         let db = self.env.create_database(&mut tx, None)?;
-        self.db = Some(db.clone());
+        self.db = Some(db);
         Ok(HeedWriter { tx: Some(tx), db })
     }
     fn get_reader(&self) -> Result<impl DiskReader<StorageError = heed::Error>, heed::Error> {
@@ -391,14 +402,17 @@ pub struct HeedWriter<'tx> {
 
 impl DiskWriter<heed::Error> for HeedWriter<'_> {
     fn put(&mut self, key: Vec<u8>, val: Vec<u8>) -> Result<(), heed::Error> {
-        let mut tx = self.tx.as_mut().unwrap();
-        self.db.put(&mut tx, &key, &val)?;
+        let tx = self.tx.as_mut().unwrap();
+        self.db.put(tx, &key, &val)?;
         Ok(())
     }
-    fn put_many(&mut self, kv: impl Iterator<Item = (Vec<u8>, Vec<u8>)>) -> Result<(), heed::Error> {
-        let mut tx = self.tx.as_mut().unwrap();
+    fn put_many(
+        &mut self,
+        kv: impl Iterator<Item = (Vec<u8>, Vec<u8>)>,
+    ) -> Result<(), heed::Error> {
+        let tx = self.tx.as_mut().unwrap();
         for (k, v) in kv {
-            self.db.put(&mut tx, &k, &v)?;
+            self.db.put(tx, &k, &v)?;
         }
         Ok(())
     }
