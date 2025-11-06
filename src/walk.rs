@@ -1,6 +1,6 @@
 //! Depth-first MST traversal
 
-use crate::disk::{DiskReader, StorageErrorBase};
+use crate::disk::SqliteReader;
 use crate::drive::{MaybeProcessedBlock, Processable};
 use crate::mst::Node;
 use ipld_core::cid::Cid;
@@ -24,11 +24,11 @@ pub enum Trip {
 
 /// Errors that can happen while walking
 #[derive(Debug, thiserror::Error)]
-pub enum DiskTrip<E: StorageErrorBase> {
+pub enum DiskTrip {
     #[error("tripped: {0}")]
     Trip(#[from] Trip),
     #[error("storage error: {0}")]
-    StorageError(#[from] E),
+    StorageError(#[from] rusqlite::Error),
     #[error("Decode error: {0}")]
     BincodeDecodeError(#[from] bincode::error::DecodeError),
 }
@@ -170,11 +170,11 @@ impl Walker {
     }
 
     /// blocking!!!!!!
-    pub fn disk_step<T: Processable, R: DiskReader>(
+    pub fn disk_step<T: Processable>(
         &mut self,
-        reader: &mut R,
+        reader: &mut SqliteReader,
         process: impl Fn(Vec<u8>) -> T,
-    ) -> Result<Step<T>, DiskTrip<R::StorageError>> {
+    ) -> Result<Step<T>, DiskTrip> {
         loop {
             let Some(mut need) = self.stack.last() else {
                 log::trace!("tried to walk but we're actually done.");

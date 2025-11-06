@@ -41,9 +41,6 @@ async fn main() -> Result<()> {
             repo_stream::drive::Vehicle::Lil(_, _) => panic!("try this on a bigger car"),
             repo_stream::drive::Vehicle::Big(big_stuff) => {
                 let disk_store = repo_stream::disk::SqliteStore::new(tmpfile.clone(), limit_mb);
-                // let disk_store = repo_stream::disk::RedbStore::new(tmpfile.clone(), limit_mb);
-                // let disk_store = repo_stream::disk::RustcaskStore::new(tmpfile.clone());
-                // let disk_store = repo_stream::disk::HeedStore::new(tmpfile.clone());
                 let (commit, driver) = big_stuff.finish_loading(disk_store).await?;
                 log::warn!("big: {:?}", commit);
                 driver
@@ -67,8 +64,7 @@ async fn main() -> Result<()> {
     drop(driver);
     log::info!("bye! {n}");
 
-    std::fs::remove_file(tmpfile).unwrap();
-    // std::fs::remove_dir_all(tmpfile).unwrap();
+    std::fs::remove_file(tmpfile).unwrap(); // need to also remove -shm -wal
 
     Ok(())
 }

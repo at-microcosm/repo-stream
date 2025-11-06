@@ -1,6 +1,6 @@
 //! Consume an MST block stream, producing an ordered stream of records
 
-use crate::disk::{DiskAccess, DiskStore, DiskWriter, StorageErrorBase};
+use crate::disk::{SqliteAccess, SqliteStore};
 use ipld_core::cid::Cid;
 use iroh_car::CarReader;
 use serde::de::DeserializeOwned;
@@ -30,13 +30,13 @@ pub enum DriveError {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum DiskDriveError<E: StorageErrorBase> {
+pub enum DiskDriveError {
     #[error("Error from iroh_car: {0}")]
     CarReader(#[from] iroh_car::Error),
     #[error("Failed to decode commit block: {0}")]
     BadBlock(#[from] serde_ipld_dagcbor::DecodeError<Infallible>),
     #[error("Storage error")]
-    StorageError(#[from] E),
+    StorageError(#[from] rusqlite::Error),
     #[error("The Commit block reference by the root was not found")]
     MissingCommit,
     #[error("The MST block {0} could not be found")]
@@ -46,7 +46,7 @@ pub enum DiskDriveError<E: StorageErrorBase> {
     #[error("Decode error: {0}")]
     BincodeDecodeError(#[from] bincode::error::DecodeError),
     #[error("disk tripped: {0}")]
-    DiskTripped(#[from] DiskTrip<E>),
+    DiskTripped(#[from] DiskTrip),
 }
 
 pub trait Processable: Clone + Serialize + DeserializeOwned {
@@ -190,14 +190,10 @@ pub fn decode<T: Processable>(bytes: &[u8]) -> Result<T, bincode::error::DecodeE
 }
 
 impl<R: AsyncRead + Unpin, T: Processable + Send + 'static> BigCar<R, T> {
-    pub async fn finish_loading<S: DiskStore>(
+    pub async fn finish_loading(
         mut self,
-        mut store: S,
-    ) -> Result<(Commit, BigCarReady<T, S::Access>), DiskDriveError<S::StorageError>>
-    where
-        S::Access: Send + 'static,
-        S::StorageError: 'static,
-    {
+        mut store: SqliteStore,
+    ) -> Result<(Commit, BigCarReady<T>), DiskDriveError> {
         // set up access for real
         let mut access = store.get_access().await?;
 
@@ -214,7 +210,7 @@ impl<R: AsyncRead + Unpin, T: Processable + Send + 'static> BigCar<R, T> {
             writer.put_many(kvs)?;
 
             drop(writer); // cannot outlive access
-            Ok::<_, DiskDriveError<S::StorageError>>(access)
+            Ok::<_, DiskDriveError>(access)
         })
         .await
         .unwrap()?;
@@ -262,7 +258,7 @@ impl<R: AsyncRead + Unpin, T: Processable + Send + 'static> BigCar<R, T> {
                 writer.put_many(kvs)?;
 
                 drop(writer); // cannot outlive access
-                Ok::<_, DiskDriveError<S::StorageError>>(access)
+                Ok::<_, DiskDriveError>(access)
             })
             .await
             .unwrap()?; // TODO
@@ -283,20 +279,17 @@ impl<R: AsyncRead + Unpin, T: Processable + Send + 'static> BigCar<R, T> {
     }
 }
 
-pub struct BigCarReady<T: Clone, A: DiskAccess> {
+pub struct BigCarReady<T: Clone> {
     process: fn(Vec<u8>) -> T,
-    access: A,
+    access: SqliteAccess,
     walker: Walker,
 }
 
-impl<T: Processable + Send + 'static, A: DiskAccess + Send + 'static> BigCarReady<T, A> {
+impl<T: Processable + Send + 'static> BigCarReady<T> {
     pub async fn next_chunk(
         mut self,
         n: usize,
-    ) -> Result<(Self, Option<Vec<(String, T)>>), DiskDriveError<A::StorageError>>
-    where
-        A::StorageError: Send,
-    {
+    ) -> Result<(Self, Option<Vec<(String, T)>>), DiskDriveError> {
         let mut out = Vec::with_capacity(n);
         (self, out) = tokio::task::spawn_blocking(move || {
             let access = self.access;
@@ -316,7 +309,7 @@ impl<T: Processable + Send + 'static, A: DiskAccess + Send + 'static> BigCarRead
 
             drop(reader); // cannot outlive access
             self.access = access;
-            Ok::<_, DiskDriveError<A::StorageError>>((self, out))
+            Ok::<_, DiskDriveError>((self, out))
         })
         .await
         .unwrap()?; // TODO
