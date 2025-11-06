@@ -330,6 +330,52 @@ impl<T: Processable + Send + 'static> BigCarReady<T> {
             Ok((self, Some(out)))
         }
     }
+
+    pub async fn rx(
+        mut self,
+        n: usize,
+    ) -> Result<
+        (
+            tokio::sync::mpsc::Receiver<Vec<(String, T)>>,
+            tokio::task::JoinHandle<Result<(), DiskDriveError>>,
+        ),
+        DiskDriveError,
+    > {
+        let (tx, rx) = tokio::sync::mpsc::channel::<Vec<(String, T)>>(1);
+
+        // sketch: this worker is going to be allowed to execute without a join handle
+        // ...should we return the join handle here so the caller at least knows about it?
+        // yes probably for error handling?? (orrr put errors in the channel)
+        let worker = tokio::task::spawn_blocking(move || {
+            let mut reader = self.access.get_reader()?;
+
+            loop {
+                let mut out = Vec::with_capacity(n);
+
+                for _ in 0..n {
+                    // walk as far as we can until we run out of blocks or find a record
+                    match self.walker.disk_step(&mut reader, self.process)? {
+                        Step::Missing(cid) => return Err(DiskDriveError::MissingBlock(cid)),
+                        Step::Finish => break,
+                        Step::Step { rkey, data } => {
+                            out.push((rkey, data));
+                            continue;
+                        }
+                    };
+                }
+
+                if out.is_empty() {
+                    break;
+                }
+                tx.blocking_send(out).unwrap();
+            }
+
+            drop(reader); // cannot outlive access
+            Ok(())
+        }); // await later
+
+        Ok((rx, worker))
+    }
 }
 
 /// The core driver between the block stream and MST walker

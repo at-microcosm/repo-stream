@@ -36,32 +36,32 @@ async fn main() -> Result<()> {
 
     let limit_mb = 32;
 
-    let mut driver =
-        match repo_stream::drive::load_car(reader, |block| S(block.len()), 10 * mb).await? {
-            repo_stream::drive::Vehicle::Lil(_, _) => panic!("try this on a bigger car"),
-            repo_stream::drive::Vehicle::Big(big_stuff) => {
-                let disk_store = repo_stream::disk::SqliteStore::new(tmpfile.clone(), limit_mb);
-                let (commit, driver) = big_stuff.finish_loading(disk_store).await?;
-                log::warn!("big: {:?}", commit);
-                driver
-            }
-        };
-
-    println!("hello!");
+    let driver = match repo_stream::drive::load_car(reader, |block| S(block.len()), 10 * mb).await?
+    {
+        repo_stream::drive::Vehicle::Lil(_, _) => panic!("try this on a bigger car"),
+        repo_stream::drive::Vehicle::Big(big_stuff) => {
+            let disk_store = repo_stream::disk::SqliteStore::new(tmpfile.clone(), limit_mb);
+            let (commit, driver) = big_stuff.finish_loading(disk_store).await?;
+            log::warn!("big: {:?}", commit);
+            driver
+        }
+    };
 
     let mut n = 0;
-    loop {
-        let (d, p) = driver.next_chunk(1024).await?;
-        driver = d;
-        let Some(pairs) = p else {
-            break;
-        };
+    let (mut rx, worker) = driver.rx(512).await?;
+
+    log::debug!("walking...");
+    while let Some(pairs) = rx.recv().await {
         n += pairs.len();
-        // log::info!("got {rkey:?}");
     }
+    log::debug!("done walking! joining...");
+
+    worker.await.unwrap().unwrap();
+
+    log::debug!("joined.");
+
     // log::info!("now is the time to check mem...");
     // tokio::time::sleep(std::time::Duration::from_secs(22)).await;
-    drop(driver);
     log::info!("bye! {n}");
 
     std::fs::remove_file(tmpfile).unwrap(); // need to also remove -shm -wal
