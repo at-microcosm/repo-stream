@@ -38,20 +38,17 @@ async fn main() -> Result<()> {
 
     let mut n = 0;
     let mut zeros = 0;
-    let (mut rx, worker) = driver.rx(512).await?;
+    let mut rx = driver.to_channel(512);
 
     log::debug!("walking...");
-    while let Some(pairs) = rx.recv().await {
+    while let Some(r) = rx.recv().await {
+        let pairs = r?;
         n += pairs.len();
         for (_, block) in pairs {
             zeros += block.into_iter().filter(|&b| b == b'0').count()
         }
     }
-    log::debug!("done walking! joining...");
-
-    worker.await.unwrap().unwrap();
-
-    log::debug!("joined.");
+    log::debug!("done walking!");
 
     // log::info!("now is the time to check mem...");
     // tokio::time::sleep(std::time::Duration::from_secs(22)).await;

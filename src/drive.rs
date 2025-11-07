@@ -7,7 +7,7 @@ use iroh_car::CarReader;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::convert::Infallible;
-use tokio::io::AsyncRead;
+use tokio::{io::AsyncRead, sync::mpsc};
 
 use crate::mst::{Commit, Node};
 use crate::walk::{Step, WalkError, Walker};
@@ -44,6 +44,8 @@ pub enum DecodeError {
     #[error("extra bytes remained after decoding")]
     ExtraGarbage,
 }
+
+pub type BlockChunk<T> = Vec<(String, T)>;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum MaybeProcessedBlock<T> {
@@ -161,6 +163,50 @@ impl<R: AsyncRead + Unpin, T: Processable> Driver<R, T> {
     }
 }
 
+/// The core driver between the block stream and MST walker
+///
+/// In the future, PDSs will export CARs in a stream-friendly order that will
+/// enable processing them with tiny memory overhead. But that future is not
+/// here yet.
+///
+/// CARs are almost always in a stream-unfriendly order, so I'm reverting the
+/// optimistic stream features: we load all block first, then walk the MST.
+///
+/// This makes things much simpler: we only need to worry about spilling to disk
+/// in one place, and we always have a reasonable expecatation about how much
+/// work the init function will do. We can drop the CAR reader before walking,
+/// so the sync/async boundaries become a little easier to work around.
+#[derive(Debug)]
+pub struct MemDriver<T: Processable> {
+    blocks: HashMap<Cid, MaybeProcessedBlock<T>>,
+    walker: Walker,
+    process: fn(Vec<u8>) -> T,
+}
+
+impl<T: Processable> MemDriver<T> {
+    /// Manually step through the record outputs
+    pub async fn next_chunk(&mut self, n: usize) -> Result<Option<BlockChunk<T>>, DriveError> {
+        let mut out = Vec::with_capacity(n);
+        for _ in 0..n {
+            // walk as far as we can until we run out of blocks or find a record
+            match self.walker.step(&mut self.blocks, self.process)? {
+                Step::Missing(cid) => return Err(DriveError::MissingBlock(cid)),
+                Step::Finish => break,
+                Step::Step { rkey, data } => {
+                    out.push((rkey, data));
+                    continue;
+                }
+            };
+        }
+
+        if out.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(out))
+        }
+    }
+}
+
 /// a paritally memory-loaded car file that needs disk spillover to continue
 pub struct BigCar<R: AsyncRead + Unpin, T: Processable> {
     car: CarReader<R>,
@@ -204,7 +250,7 @@ impl<R: AsyncRead + Unpin, T: Processable + Send + 'static> BigCar<R, T> {
         })
         .await??;
 
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<(Cid, MaybeProcessedBlock<T>)>>(2);
+        let (tx, mut rx) = mpsc::channel::<Vec<(Cid, MaybeProcessedBlock<T>)>>(2);
 
         let store_worker = tokio::task::spawn_blocking(move || {
             let mut writer = store.get_writer()?;
@@ -290,7 +336,7 @@ impl<T: Processable + Send + 'static> BigCarReady<T> {
     pub async fn next_chunk(
         mut self,
         n: usize,
-    ) -> Result<(Self, Option<Vec<(String, T)>>), DriveError> {
+    ) -> Result<(Self, Option<BlockChunk<T>>), DriveError> {
         let mut out = Vec::with_capacity(n);
         (self, out) = tokio::task::spawn_blocking(move || {
             let store = self.store;
@@ -321,94 +367,58 @@ impl<T: Processable + Send + 'static> BigCarReady<T> {
         }
     }
 
-    pub async fn rx(
+    fn read_tx_blocking(
         mut self,
         n: usize,
-    ) -> Result<
-        (
-            tokio::sync::mpsc::Receiver<Vec<(String, T)>>,
-            tokio::task::JoinHandle<Result<(), DriveError>>,
-        ),
-        DriveError,
-    > {
-        let (tx, rx) = tokio::sync::mpsc::channel::<Vec<(String, T)>>(1);
+        tx: mpsc::Sender<Result<BlockChunk<T>, DriveError>>,
+    ) -> Result<(), mpsc::error::SendError<Result<BlockChunk<T>, DriveError>>> {
+        let mut reader = match self.store.get_reader() {
+            Ok(r) => r,
+            Err(e) => return tx.blocking_send(Err(e.into())),
+        };
 
-        // sketch: this worker is going to be allowed to execute without a join handle
-        // ...should we return the join handle here so the caller at least knows about it?
-        // yes probably for error handling?? (orrr put errors in the channel)
-        let worker = tokio::task::spawn_blocking(move || {
-            let mut reader = self.store.get_reader()?;
+        loop {
+            let mut out: BlockChunk<T> = Vec::with_capacity(n);
 
-            loop {
-                let mut out = Vec::with_capacity(n);
+            for _ in 0..n {
+                // walk as far as we can until we run out of blocks or find a record
 
-                for _ in 0..n {
-                    // walk as far as we can until we run out of blocks or find a record
-                    match self.walker.disk_step(&mut reader, self.process)? {
-                        Step::Missing(cid) => return Err(DriveError::MissingBlock(cid)),
-                        Step::Finish => break,
-                        Step::Step { rkey, data } => {
-                            out.push((rkey, data));
-                            continue;
-                        }
-                    };
-                }
+                let step = match self.walker.disk_step(&mut reader, self.process) {
+                    Ok(s) => s,
+                    Err(e) => return tx.blocking_send(Err(e.into())),
+                };
 
-                if out.is_empty() {
-                    break;
-                }
-                tx.blocking_send(out)
-                    .map_err(|_| DriveError::ChannelSendError)?;
+                match step {
+                    Step::Missing(cid) => {
+                        return tx.blocking_send(Err(DriveError::MissingBlock(cid)));
+                    }
+                    Step::Finish => return Ok(()),
+                    Step::Step { rkey, data } => {
+                        out.push((rkey, data));
+                        continue;
+                    }
+                };
             }
 
-            drop(reader); // cannot outlive store
-            Ok(())
-        }); // await later
+            if out.is_empty() {
+                break;
+            }
+            tx.blocking_send(Ok(out))?;
+        }
 
-        Ok((rx, worker))
+        Ok(())
     }
-}
 
-/// The core driver between the block stream and MST walker
-///
-/// In the future, PDSs will export CARs in a stream-friendly order that will
-/// enable processing them with tiny memory overhead. But that future is not
-/// here yet.
-///
-/// CARs are almost always in a stream-unfriendly order, so I'm reverting the
-/// optimistic stream features: we load all block first, then walk the MST.
-///
-/// This makes things much simpler: we only need to worry about spilling to disk
-/// in one place, and we always have a reasonable expecatation about how much
-/// work the init function will do. We can drop the CAR reader before walking,
-/// so the sync/async boundaries become a little easier to work around.
-#[derive(Debug)]
-pub struct MemDriver<T: Processable> {
-    blocks: HashMap<Cid, MaybeProcessedBlock<T>>,
-    walker: Walker,
-    process: fn(Vec<u8>) -> T,
-}
+    pub fn to_channel(self, n: usize) -> mpsc::Receiver<Result<BlockChunk<T>, DriveError>> {
+        let (tx, rx) = mpsc::channel::<Result<BlockChunk<T>, DriveError>>(1);
 
-impl<T: Processable> MemDriver<T> {
-    /// Manually step through the record outputs
-    pub async fn next_chunk(&mut self, n: usize) -> Result<Option<Vec<(String, T)>>, DriveError> {
-        let mut out = Vec::with_capacity(n);
-        for _ in 0..n {
-            // walk as far as we can until we run out of blocks or find a record
-            match self.walker.step(&mut self.blocks, self.process)? {
-                Step::Missing(cid) => return Err(DriveError::MissingBlock(cid)),
-                Step::Finish => break,
-                Step::Step { rkey, data } => {
-                    out.push((rkey, data));
-                    continue;
-                }
-            };
-        }
+        // sketch: this worker is going to be allowed to execute without a join handle
+        tokio::task::spawn_blocking(move || {
+            if let Err(mpsc::error::SendError(_)) = self.read_tx_blocking(n, tx) {
+                log::debug!("big car reader exited early due to dropped receiver channel");
+            }
+        });
 
-        if out.is_empty() {
-            Ok(None)
-        } else {
-            Ok(Some(out))
-        }
+        rx
     }
 }
