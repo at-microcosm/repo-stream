@@ -1,5 +1,6 @@
 extern crate repo_stream;
 use clap::Parser;
+use repo_stream::{Driver, noop};
 use std::path::PathBuf;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -25,9 +26,9 @@ async fn main() -> Result<()> {
 
     let limit_mb = 32;
 
-    let driver = match repo_stream::drive::load_car(reader, |block| block, 10 * mb).await? {
-        repo_stream::drive::Vehicle::Lil(_, _) => panic!("try this on a bigger car"),
-        repo_stream::drive::Vehicle::Big(big_stuff) => {
+    let driver = match Driver::load_car(reader, noop, 10 * mb).await? {
+        Driver::Lil(_, _) => panic!("try this on a bigger car"),
+        Driver::Big(big_stuff) => {
             let disk_store = repo_stream::disk::SqliteStore::new(tmpfile.clone(), limit_mb).await?;
             let (commit, driver) = big_stuff.finish_loading(disk_store).await?;
             log::warn!("big: {:?}", commit);

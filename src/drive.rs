@@ -88,75 +88,77 @@ impl<T: Processable> Processable for MaybeProcessedBlock<T> {
     }
 }
 
-pub enum Vehicle<R: AsyncRead + Unpin, T: Processable> {
+pub enum Driver<R: AsyncRead + Unpin, T: Processable> {
     Lil(Commit, MemDriver<T>),
     Big(BigCar<R, T>),
 }
 
-pub async fn load_car<R: AsyncRead + Unpin, T: Processable>(
-    reader: R,
-    process: fn(Vec<u8>) -> T,
-    max_size: usize,
-) -> Result<Vehicle<R, T>, DriveError> {
-    let mut mem_blocks = HashMap::new();
+impl<R: AsyncRead + Unpin, T: Processable> Driver<R, T> {
+    pub async fn load_car(
+        reader: R,
+        process: fn(Vec<u8>) -> T,
+        max_size: usize,
+    ) -> Result<Driver<R, T>, DriveError> {
+        let mut mem_blocks = HashMap::new();
 
-    let mut car = CarReader::new(reader).await?;
+        let mut car = CarReader::new(reader).await?;
 
-    let root = *car
-        .header()
-        .roots()
-        .first()
-        .ok_or(DriveError::MissingRoot)?;
-    log::debug!("root: {root:?}");
+        let root = *car
+            .header()
+            .roots()
+            .first()
+            .ok_or(DriveError::MissingRoot)?;
+        log::debug!("root: {root:?}");
 
-    let mut commit = None;
+        let mut commit = None;
 
-    // try to load all the blocks into memory
-    let mut mem_size = 0;
-    while let Some((cid, data)) = car.next_block().await? {
-        // the root commit is a Special Third Kind of block that we need to make
-        // sure not to optimistically send to the processing function
-        if cid == root {
-            let c: Commit = serde_ipld_dagcbor::from_slice(&data)?;
-            commit = Some(c);
-            continue;
+        // try to load all the blocks into memory
+        let mut mem_size = 0;
+        while let Some((cid, data)) = car.next_block().await? {
+            // the root commit is a Special Third Kind of block that we need to make
+            // sure not to optimistically send to the processing function
+            if cid == root {
+                let c: Commit = serde_ipld_dagcbor::from_slice(&data)?;
+                commit = Some(c);
+                continue;
+            }
+
+            // remaining possible types: node, record, other. optimistically process
+            let maybe_processed = if Node::could_be(&data) {
+                MaybeProcessedBlock::Raw(data)
+            } else {
+                MaybeProcessedBlock::Processed(process(data))
+            };
+
+            // stash (maybe processed) blocks in memory as long as we have room
+            mem_size += std::mem::size_of::<Cid>() + maybe_processed.get_size();
+            mem_blocks.insert(cid, maybe_processed);
+            if mem_size >= max_size {
+                return Ok(Driver::Big(BigCar {
+                    car,
+                    root,
+                    process,
+                    max_size,
+                    mem_blocks,
+                    commit,
+                }));
+            }
         }
 
-        // remaining possible types: node, record, other. optimistically process
-        let maybe_processed = if Node::could_be(&data) {
-            MaybeProcessedBlock::Raw(data)
-        } else {
-            MaybeProcessedBlock::Processed(process(data))
-        };
+        // all blocks loaded and we fit in memory! hopefully we found the commit...
+        let commit = commit.ok_or(DriveError::MissingCommit)?;
 
-        // stash (maybe processed) blocks in memory as long as we have room
-        mem_size += std::mem::size_of::<Cid>() + maybe_processed.get_size();
-        mem_blocks.insert(cid, maybe_processed);
-        if mem_size >= max_size {
-            return Ok(Vehicle::Big(BigCar {
-                car,
-                root,
+        let walker = Walker::new(commit.data);
+
+        Ok(Driver::Lil(
+            commit,
+            MemDriver {
+                blocks: mem_blocks,
+                walker,
                 process,
-                max_size,
-                mem_blocks,
-                commit,
-            }));
-        }
+            },
+        ))
     }
-
-    // all blocks loaded and we fit in memory! hopefully we found the commit...
-    let commit = commit.ok_or(DriveError::MissingCommit)?;
-
-    let walker = Walker::new(commit.data);
-
-    Ok(Vehicle::Lil(
-        commit,
-        MemDriver {
-            blocks: mem_blocks,
-            walker,
-            process,
-        },
-    ))
 }
 
 /// a paritally memory-loaded car file that needs disk spillover to continue

@@ -1,5 +1,6 @@
 extern crate repo_stream;
 use clap::Parser;
+use repo_stream::Driver;
 use std::path::PathBuf;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -19,9 +20,9 @@ async fn main() -> Result<()> {
     let reader = tokio::io::BufReader::new(reader);
 
     let (commit, mut driver) =
-        match repo_stream::drive::load_car(reader, |block| block.len(), 1024 * 1024).await? {
-            repo_stream::drive::Vehicle::Lil(commit, mem_driver) => (commit, mem_driver),
-            repo_stream::drive::Vehicle::Big(_) => panic!("can't handle big cars yet"),
+        match Driver::load_car(reader, |block| block.len(), 16 * 1024 * 1024).await? {
+            Driver::Lil(commit, mem_driver) => (commit, mem_driver),
+            Driver::Big(_) => panic!("can't handle big cars yet"),
         };
 
     log::info!("got commit: {commit:?}");

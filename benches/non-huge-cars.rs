@@ -1,4 +1,5 @@
 extern crate repo_stream;
+use repo_stream::Driver;
 
 use criterion::{Criterion, criterion_group, criterion_main};
 
@@ -24,14 +25,13 @@ pub fn criterion_benchmark(c: &mut Criterion) {
 }
 
 async fn drive_car(bytes: &[u8]) -> usize {
-    let mut driver =
-        match repo_stream::drive::load_car(bytes, |block| block.len(), 32 * 2_usize.pow(20))
-            .await
-            .unwrap()
-        {
-            repo_stream::drive::Vehicle::Lil(_, mem_driver) => mem_driver,
-            repo_stream::drive::Vehicle::Big(_) => panic!("not benching big cars here"),
-        };
+    let mut driver = match Driver::load_car(bytes, |block| block.len(), 32 * 2_usize.pow(20))
+        .await
+        .unwrap()
+    {
+        Driver::Lil(_, mem_driver) => mem_driver,
+        Driver::Big(_) => panic!("not benching big cars here"),
+    };
 
     let mut n = 0;
     while let Some(pairs) = driver.next_chunk(256).await.unwrap() {

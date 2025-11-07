@@ -7,3 +7,7 @@ pub mod drive;
 pub mod mst;
 pub mod process;
 pub mod walk;
+
+pub use disk::SqliteStore;
+pub use drive::{DriveError, Driver};
+pub use process::{Processable, noop};

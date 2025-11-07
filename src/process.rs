@@ -5,6 +5,11 @@ pub trait Processable: Clone + Serialize + DeserializeOwned {
     fn get_size(&self) -> usize;
 }
 
+#[inline]
+pub fn noop(block: Vec<u8>) -> Vec<u8> {
+    block
+}
+
 impl Processable for u8 {
     fn get_size(&self) -> usize {
         0
