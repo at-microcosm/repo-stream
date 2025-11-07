@@ -31,12 +31,18 @@ pub enum DriveError {
     StorageError(#[from] rusqlite::Error),
     #[error("Encode error: {0}")]
     BincodeEncodeError(#[from] bincode::error::EncodeError),
-    #[error("Decode error: {0}")]
-    BincodeDecodeError(#[from] bincode::error::DecodeError),
     #[error("Tried to send on a closed channel")]
     ChannelSendError, // SendError takes <T> which we don't need
     #[error("Failed to join a task: {0}")]
     JoinError(#[from] tokio::task::JoinError),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum DecodeError {
+    #[error(transparent)]
+    BincodeDecodeError(#[from] bincode::error::DecodeError),
+    #[error("extra bytes remained after decoding")]
+    ExtraGarbage,
 }
 
 pub trait Processable: Clone + Serialize + DeserializeOwned {
@@ -172,9 +178,11 @@ fn encode(v: impl Serialize) -> Result<Vec<u8>, bincode::error::EncodeError> {
     bincode::serde::encode_to_vec(v, bincode::config::standard())
 }
 
-pub fn decode<T: Processable>(bytes: &[u8]) -> Result<T, bincode::error::DecodeError> {
+pub fn decode<T: Processable>(bytes: &[u8]) -> Result<T, DecodeError> {
     let (t, n) = bincode::serde::decode_from_slice(bytes, bincode::config::standard())?;
-    assert_eq!(n, bytes.len(), "expected to decode all bytes"); // TODO
+    if n != bytes.len() {
+        return Err(DecodeError::ExtraGarbage);
+    }
     Ok(t)
 }
 

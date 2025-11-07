@@ -1,7 +1,7 @@
 //! Depth-first MST traversal
 
 use crate::disk::SqliteReader;
-use crate::drive::{MaybeProcessedBlock, Processable};
+use crate::drive::{DecodeError, MaybeProcessedBlock, Processable};
 use crate::mst::Node;
 use ipld_core::cid::Cid;
 use sha2::{Digest, Sha256};
@@ -20,7 +20,7 @@ pub enum WalkError {
     #[error("storage error: {0}")]
     StorageError(#[from] rusqlite::Error),
     #[error("Decode error: {0}")]
-    BincodeDecodeError(#[from] bincode::error::DecodeError),
+    DecodeError(#[from] DecodeError),
 }
 
 /// Errors from invalid Rkeys
