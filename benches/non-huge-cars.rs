@@ -1,13 +1,21 @@
 extern crate repo_stream;
-use futures::TryStreamExt;
-use iroh_car::CarReader;
-use std::convert::Infallible;
 
 use criterion::{Criterion, criterion_group, criterion_main};
+use repo_stream::drive::Processable;
+use serde::{Deserialize, Serialize};
 
 const TINY_CAR: &'static [u8] = include_bytes!("../car-samples/tiny.car");
 const LITTLE_CAR: &'static [u8] = include_bytes!("../car-samples/little.car");
 const MIDSIZE_CAR: &'static [u8] = include_bytes!("../car-samples/midsize.car");
+
+#[derive(Clone, Serialize, Deserialize)]
+struct S(usize);
+
+impl Processable for S {
+    fn get_size(&self) -> usize {
+        0 // no additional space taken, just its stack size (newtype is free)
+    }
+}
 
 pub fn criterion_benchmark(c: &mut Criterion) {
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -26,28 +34,21 @@ pub fn criterion_benchmark(c: &mut Criterion) {
     });
 }
 
-async fn drive_car(bytes: &[u8]) {
-    let reader = CarReader::new(bytes).await.unwrap();
-
-    let root = reader
-        .header()
-        .roots()
-        .first()
-        .ok_or("missing root")
-        .unwrap()
-        .clone();
-
-    let stream = std::pin::pin!(reader.stream());
-
-    let (_commit, v) =
-        repo_stream::drive::Vehicle::init(root, stream, |block| Ok::<_, Infallible>(block.len()))
+async fn drive_car(bytes: &[u8]) -> usize {
+    let mut driver =
+        match repo_stream::drive::load_car(bytes, |block| S(block.len()), 32 * 2_usize.pow(20))
             .await
-            .unwrap();
-    let mut record_stream = std::pin::pin!(v.stream());
+            .unwrap()
+        {
+            repo_stream::drive::Vehicle::Lil(_, mem_driver) => mem_driver,
+            repo_stream::drive::Vehicle::Big(_) => panic!("not benching big cars here"),
+        };
 
-    while let Some(_) = record_stream.try_next().await.unwrap() {
-        // just here for the drive
+    let mut n = 0;
+    while let Some(pairs) = driver.next_chunk(256).await.unwrap() {
+        n += pairs.len();
     }
+    n
 }
 
 criterion_group!(benches, criterion_benchmark);
