@@ -1,24 +1,13 @@
 extern crate repo_stream;
-use repo_stream::drive::Processable;
-use serde::{Deserialize, Serialize};
 
 const TINY_CAR: &'static [u8] = include_bytes!("../car-samples/tiny.car");
 const LITTLE_CAR: &'static [u8] = include_bytes!("../car-samples/little.car");
 const MIDSIZE_CAR: &'static [u8] = include_bytes!("../car-samples/midsize.car");
 
-#[derive(Clone, Serialize, Deserialize)]
-struct S(usize);
-
-impl Processable for S {
-    fn get_size(&self) -> usize {
-        0 // no additional space taken, just its stack size (newtype is free)
-    }
-}
-
 async fn test_car(bytes: &[u8], expected_records: usize, expected_sum: usize) {
     let mb = 2_usize.pow(20);
 
-    let mut driver = match repo_stream::drive::load_car(bytes, |block| S(block.len()), 10 * mb)
+    let mut driver = match repo_stream::drive::load_car(bytes, |block| block.len(), 10 * mb)
         .await
         .unwrap()
     {
@@ -32,7 +21,7 @@ async fn test_car(bytes: &[u8], expected_records: usize, expected_sum: usize) {
     let mut prev_rkey = "".to_string();
 
     while let Some(pairs) = driver.next_chunk(256).await.unwrap() {
-        for (rkey, S(size)) in pairs {
+        for (rkey, size) in pairs {
             records += 1;
             sum += size;
             if rkey == "app.bsky.actor.profile/self" {

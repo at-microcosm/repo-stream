@@ -1,8 +1,9 @@
 //! Depth-first MST traversal
 
 use crate::disk::SqliteReader;
-use crate::drive::{DecodeError, MaybeProcessedBlock, Processable};
+use crate::drive::{DecodeError, MaybeProcessedBlock};
 use crate::mst::Node;
+use crate::process::Processable;
 use ipld_core::cid::Cid;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;

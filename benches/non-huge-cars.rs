@@ -1,21 +1,10 @@
 extern crate repo_stream;
 
 use criterion::{Criterion, criterion_group, criterion_main};
-use repo_stream::drive::Processable;
-use serde::{Deserialize, Serialize};
 
 const TINY_CAR: &'static [u8] = include_bytes!("../car-samples/tiny.car");
 const LITTLE_CAR: &'static [u8] = include_bytes!("../car-samples/little.car");
 const MIDSIZE_CAR: &'static [u8] = include_bytes!("../car-samples/midsize.car");
-
-#[derive(Clone, Serialize, Deserialize)]
-struct S(usize);
-
-impl Processable for S {
-    fn get_size(&self) -> usize {
-        0 // no additional space taken, just its stack size (newtype is free)
-    }
-}
 
 pub fn criterion_benchmark(c: &mut Criterion) {
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -36,7 +25,7 @@ pub fn criterion_benchmark(c: &mut Criterion) {
 
 async fn drive_car(bytes: &[u8]) -> usize {
     let mut driver =
-        match repo_stream::drive::load_car(bytes, |block| S(block.len()), 32 * 2_usize.pow(20))
+        match repo_stream::drive::load_car(bytes, |block| block.len(), 32 * 2_usize.pow(20))
             .await
             .unwrap()
         {

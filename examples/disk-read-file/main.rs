@@ -1,7 +1,5 @@
 extern crate repo_stream;
 use clap::Parser;
-use repo_stream::drive::Processable;
-use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -12,15 +10,6 @@ struct Args {
     car: PathBuf,
     #[arg()]
     tmpfile: PathBuf,
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-struct S(usize);
-
-impl Processable for S {
-    fn get_size(&self) -> usize {
-        0 // no additional space taken, just its stack size (newtype is free)
-    }
 }
 
 #[tokio::main]
@@ -36,11 +25,10 @@ async fn main() -> Result<()> {
 
     let limit_mb = 32;
 
-    let driver = match repo_stream::drive::load_car(reader, |block| S(block.len()), 10 * mb).await?
-    {
+    let driver = match repo_stream::drive::load_car(reader, |block| block.len(), 10 * mb).await? {
         repo_stream::drive::Vehicle::Lil(_, _) => panic!("try this on a bigger car"),
         repo_stream::drive::Vehicle::Big(big_stuff) => {
-            let disk_store = repo_stream::disk::SqliteStore::new(tmpfile.clone(), limit_mb);
+            let disk_store = repo_stream::disk::SqliteStore::new(tmpfile.clone(), limit_mb).await?;
             let (commit, driver) = big_stuff.finish_loading(disk_store).await?;
             log::warn!("big: {:?}", commit);
             driver

@@ -3,31 +3,26 @@ use rusqlite::OptionalExtension;
 use std::path::PathBuf;
 
 pub struct SqliteStore {
-    path: PathBuf,
-    limit_mb: usize,
+    conn: rusqlite::Connection,
 }
 
 impl SqliteStore {
-    pub fn new(path: PathBuf, limit_mb: usize) -> Self {
-        Self { path, limit_mb }
-    }
-}
-
-impl SqliteStore {
-    pub async fn get_access(&mut self) -> Result<SqliteAccess, rusqlite::Error> {
-        let path = self.path.clone();
-        let limit_mb = self.limit_mb;
+    pub async fn new(path: PathBuf, cache_mb: usize) -> Result<Self, rusqlite::Error> {
         let conn = tokio::task::spawn_blocking(move || {
             let conn = rusqlite::Connection::open(path)?;
 
-            let sq_mb = -(2_i64.pow(10)); // negative is kibibytes for sqlite cache_size
+            let sqlite_one_mb = -(2_i64.pow(10)); // negative is kibibytes for sqlite cache_size
 
             // conn.pragma_update(None, "journal_mode", "OFF")?;
             // conn.pragma_update(None, "journal_mode", "MEMORY")?;
             conn.pragma_update(None, "journal_mode", "WAL")?;
             // conn.pragma_update(None, "wal_autocheckpoint", "0")?; // this lets things get a bit big on disk
             conn.pragma_update(None, "synchronous", "OFF")?;
-            conn.pragma_update(None, "cache_size", (limit_mb as i64 * sq_mb).to_string())?;
+            conn.pragma_update(
+                None,
+                "cache_size",
+                (cache_mb as i64 * sqlite_one_mb).to_string(),
+            )?;
             conn.execute(
                 "CREATE TABLE blocks (
                     key  BLOB PRIMARY KEY NOT NULL,
@@ -41,15 +36,8 @@ impl SqliteStore {
         .await
         .expect("join error")?;
 
-        Ok(SqliteAccess { conn })
+        Ok(Self { conn })
     }
-}
-
-pub struct SqliteAccess {
-    conn: rusqlite::Connection,
-}
-
-impl SqliteAccess {
     pub fn get_writer(&'_ mut self) -> Result<SqliteWriter<'_>, rusqlite::Error> {
         let tx = self.conn.transaction()?;
         // let insert_stmt = tx.prepare("INSERT INTO blocks (key, val) VALUES (?1, ?2)")?;

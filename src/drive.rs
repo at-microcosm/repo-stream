@@ -1,9 +1,9 @@
 //! Consume an MST block stream, producing an ordered stream of records
 
-use crate::disk::{SqliteAccess, SqliteStore};
+use crate::disk::SqliteStore;
+use crate::process::Processable;
 use ipld_core::cid::Cid;
 use iroh_car::CarReader;
-use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::convert::Infallible;
@@ -43,11 +43,6 @@ pub enum DecodeError {
     BincodeDecodeError(#[from] bincode::error::DecodeError),
     #[error("extra bytes remained after decoding")]
     ExtraGarbage,
-}
-
-pub trait Processable: Clone + Serialize + DeserializeOwned {
-    /// the additional size taken up (not including its mem::size_of)
-    fn get_size(&self) -> usize;
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -191,13 +186,10 @@ impl<R: AsyncRead + Unpin, T: Processable + Send + 'static> BigCar<R, T> {
         mut self,
         mut store: SqliteStore,
     ) -> Result<(Commit, BigCarReady<T>), DriveError> {
-        // set up access for real
-        let mut access = store.get_access().await?;
-
-        // move access in and back out so we can manage lifetimes
+        // move store in and back out so we can manage lifetimes
         // dump mem blocks into the store
-        access = tokio::task::spawn(async move {
-            let mut writer = access.get_writer()?;
+        store = tokio::task::spawn(async move {
+            let mut writer = store.get_writer()?;
 
             let kvs = self
                 .mem_blocks
@@ -206,14 +198,14 @@ impl<R: AsyncRead + Unpin, T: Processable + Send + 'static> BigCar<R, T> {
 
             writer.put_many(kvs)?;
             writer.commit()?;
-            Ok::<_, DriveError>(access)
+            Ok::<_, DriveError>(store)
         })
         .await??;
 
         let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<(Cid, MaybeProcessedBlock<T>)>>(2);
 
-        let access_worker = tokio::task::spawn_blocking(move || {
-            let mut writer = access.get_writer()?;
+        let store_worker = tokio::task::spawn_blocking(move || {
+            let mut writer = store.get_writer()?;
 
             while let Some(chunk) = rx.blocking_recv() {
                 let kvs = chunk
@@ -223,7 +215,7 @@ impl<R: AsyncRead + Unpin, T: Processable + Send + 'static> BigCar<R, T> {
             }
 
             writer.commit()?;
-            Ok::<_, DriveError>(access)
+            Ok::<_, DriveError>(store)
         }); // await later
 
         // dump the rest to disk (in chunks)
@@ -267,7 +259,7 @@ impl<R: AsyncRead + Unpin, T: Processable + Send + 'static> BigCar<R, T> {
         drop(tx);
         log::debug!("done. waiting for worker to finish...");
 
-        access = access_worker.await??;
+        store = store_worker.await??;
 
         log::debug!("worker finished.");
 
@@ -279,7 +271,7 @@ impl<R: AsyncRead + Unpin, T: Processable + Send + 'static> BigCar<R, T> {
             commit,
             BigCarReady {
                 process: self.process,
-                access,
+                store,
                 walker,
             },
         ))
@@ -288,7 +280,7 @@ impl<R: AsyncRead + Unpin, T: Processable + Send + 'static> BigCar<R, T> {
 
 pub struct BigCarReady<T: Clone> {
     process: fn(Vec<u8>) -> T,
-    access: SqliteAccess,
+    store: SqliteStore,
     walker: Walker,
 }
 
@@ -299,8 +291,8 @@ impl<T: Processable + Send + 'static> BigCarReady<T> {
     ) -> Result<(Self, Option<Vec<(String, T)>>), DriveError> {
         let mut out = Vec::with_capacity(n);
         (self, out) = tokio::task::spawn_blocking(move || {
-            let access = self.access;
-            let mut reader = access.get_reader()?;
+            let store = self.store;
+            let mut reader = store.get_reader()?;
 
             for _ in 0..n {
                 // walk as far as we can until we run out of blocks or find a record
@@ -314,8 +306,8 @@ impl<T: Processable + Send + 'static> BigCarReady<T> {
                 };
             }
 
-            drop(reader); // cannot outlive access
-            self.access = access;
+            drop(reader); // cannot outlive store
+            self.store = store;
             Ok::<_, DriveError>((self, out))
         })
         .await??;
@@ -343,7 +335,7 @@ impl<T: Processable + Send + 'static> BigCarReady<T> {
         // ...should we return the join handle here so the caller at least knows about it?
         // yes probably for error handling?? (orrr put errors in the channel)
         let worker = tokio::task::spawn_blocking(move || {
-            let mut reader = self.access.get_reader()?;
+            let mut reader = self.store.get_reader()?;
 
             loop {
                 let mut out = Vec::with_capacity(n);
@@ -367,7 +359,7 @@ impl<T: Processable + Send + 'static> BigCarReady<T> {
                     .map_err(|_| DriveError::ChannelSendError)?;
             }
 
-            drop(reader); // cannot outlive access
+            drop(reader); // cannot outlive store
             Ok(())
         }); // await later
 
