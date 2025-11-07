@@ -25,7 +25,7 @@ async fn main() -> Result<()> {
 
     let limit_mb = 32;
 
-    let driver = match repo_stream::drive::load_car(reader, |block| block.len(), 10 * mb).await? {
+    let driver = match repo_stream::drive::load_car(reader, |block| block, 10 * mb).await? {
         repo_stream::drive::Vehicle::Lil(_, _) => panic!("try this on a bigger car"),
         repo_stream::drive::Vehicle::Big(big_stuff) => {
             let disk_store = repo_stream::disk::SqliteStore::new(tmpfile.clone(), limit_mb).await?;
@@ -36,11 +36,15 @@ async fn main() -> Result<()> {
     };
 
     let mut n = 0;
+    let mut zeros = 0;
     let (mut rx, worker) = driver.rx(512).await?;
 
     log::debug!("walking...");
     while let Some(pairs) = rx.recv().await {
         n += pairs.len();
+        for (_, block) in pairs {
+            zeros += block.into_iter().filter(|&b| b == b'0').count()
+        }
     }
     log::debug!("done walking! joining...");
 
@@ -50,7 +54,7 @@ async fn main() -> Result<()> {
 
     // log::info!("now is the time to check mem...");
     // tokio::time::sleep(std::time::Duration::from_secs(22)).await;
-    log::info!("bye! {n}");
+    log::info!("bye! n={n} zeros={zeros}");
 
     std::fs::remove_file(tmpfile).unwrap(); // need to also remove -shm -wal
 
