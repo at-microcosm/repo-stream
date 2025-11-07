@@ -74,12 +74,6 @@ impl Drop for SqliteWriter<'_> {
 }
 
 impl SqliteWriter<'_> {
-    pub fn put(&mut self, key: Vec<u8>, val: Vec<u8>) -> rusqlite::Result<()> {
-        let tx = self.tx.as_ref().unwrap();
-        let mut insert_stmt = tx.prepare_cached("INSERT INTO blocks (key, val) VALUES (?1, ?2)")?;
-        insert_stmt.execute((key, val))?;
-        Ok(())
-    }
     pub fn put_many(
         &mut self,
         kv: impl Iterator<Item = Result<(Vec<u8>, Vec<u8>), DriveError>>,
