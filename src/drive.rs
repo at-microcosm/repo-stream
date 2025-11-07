@@ -10,7 +10,7 @@ use std::convert::Infallible;
 use tokio::io::AsyncRead;
 
 use crate::mst::{Commit, Node};
-use crate::walk::{Step, Trip, Walker};
+use crate::walk::{Step, WalkError, Walker};
 
 /// Errors that can happen while consuming and emitting blocks and records
 #[derive(Debug, thiserror::Error)]
@@ -24,7 +24,7 @@ pub enum DriveError {
     #[error("The MST block {0} could not be found")]
     MissingBlock(Cid),
     #[error("Failed to walk the mst tree: {0}")]
-    Tripped(#[from] Trip),
+    WalkError(#[from] WalkError),
     #[error("CAR file had no roots")]
     MissingRoot,
     #[error("Storage error")]
@@ -33,6 +33,10 @@ pub enum DriveError {
     BincodeEncodeError(#[from] bincode::error::EncodeError),
     #[error("Decode error: {0}")]
     BincodeDecodeError(#[from] bincode::error::DecodeError),
+    #[error("Tried to send on a closed channel")]
+    ChannelSendError, // SendError takes <T> which we don't need
+    #[error("Failed to join a task: {0}")]
+    JoinError(#[from] tokio::task::JoinError),
 }
 
 pub trait Processable: Clone + Serialize + DeserializeOwned {
@@ -118,7 +122,6 @@ pub async fn load_car<R: AsyncRead + Unpin, T: Processable>(
         }
 
         // remaining possible types: node, record, other. optimistically process
-        // TODO: get the actual in-memory size to compute disk spill
         let maybe_processed = if Node::could_be(&data) {
             MaybeProcessedBlock::Raw(data)
         } else {
@@ -191,15 +194,14 @@ impl<R: AsyncRead + Unpin, T: Processable + Send + 'static> BigCar<R, T> {
             let kvs = self
                 .mem_blocks
                 .into_iter()
-                .map(|(k, v)| (k.to_bytes(), encode(v).unwrap()));
+                .map(|(k, v)| Ok(encode(v).map(|v| (k.to_bytes(), v))?));
 
             writer.put_many(kvs)?;
 
             drop(writer); // cannot outlive access
             Ok::<_, DriveError>(access)
         })
-        .await
-        .unwrap()?;
+        .await??;
 
         let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<(Cid, MaybeProcessedBlock<T>)>>(2);
 
@@ -209,7 +211,7 @@ impl<R: AsyncRead + Unpin, T: Processable + Send + 'static> BigCar<R, T> {
             while let Some(chunk) = rx.blocking_recv() {
                 let kvs = chunk
                     .into_iter()
-                    .map(|(k, v)| (k.to_bytes(), encode(v).unwrap()));
+                    .map(|(k, v)| Ok(encode(v).map(|v| (k.to_bytes(), v))?));
                 writer.put_many(kvs)?;
             }
 
@@ -251,12 +253,14 @@ impl<R: AsyncRead + Unpin, T: Processable + Send + 'static> BigCar<R, T> {
             if chunk.is_empty() {
                 break;
             }
-            tx.send(chunk).await.unwrap();
+            tx.send(chunk)
+                .await
+                .map_err(|_| DriveError::ChannelSendError)?;
         }
         drop(tx);
         log::debug!("done. waiting for worker to finish...");
 
-        access = access_worker.await.unwrap()?;
+        access = access_worker.await??;
 
         log::debug!("worker finished.");
 
@@ -307,8 +311,7 @@ impl<T: Processable + Send + 'static> BigCarReady<T> {
             self.access = access;
             Ok::<_, DriveError>((self, out))
         })
-        .await
-        .unwrap()?; // TODO
+        .await??;
 
         if out.is_empty() {
             Ok((self, None))
@@ -353,7 +356,8 @@ impl<T: Processable + Send + 'static> BigCarReady<T> {
                 if out.is_empty() {
                     break;
                 }
-                tx.blocking_send(out).unwrap();
+                tx.blocking_send(out)
+                    .map_err(|_| DriveError::ChannelSendError)?;
             }
 
             drop(reader); // cannot outlive access

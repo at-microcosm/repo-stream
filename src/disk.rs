@@ -1,3 +1,4 @@
+use crate::drive::DriveError;
 use rusqlite::OptionalExtension;
 use std::path::PathBuf;
 
@@ -81,11 +82,12 @@ impl SqliteWriter<'_> {
     }
     pub fn put_many(
         &mut self,
-        kv: impl Iterator<Item = (Vec<u8>, Vec<u8>)>,
-    ) -> rusqlite::Result<()> {
+        kv: impl Iterator<Item = Result<(Vec<u8>, Vec<u8>), DriveError>>,
+    ) -> Result<(), DriveError> {
         let tx = self.tx.as_ref().unwrap();
         let mut insert_stmt = tx.prepare_cached("INSERT INTO blocks (key, val) VALUES (?1, ?2)")?;
-        for (k, v) in kv {
+        for pair in kv {
+            let (k, v) = pair?;
             insert_stmt.execute((k, v))?;
         }
         Ok(())

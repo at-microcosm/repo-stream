@@ -10,7 +10,7 @@ use std::convert::Infallible;
 
 /// Errors that can happen while walking
 #[derive(Debug, thiserror::Error)]
-pub enum Trip {
+pub enum WalkError {
     #[error("Failed to fingerprint commit block")]
     BadCommitFingerprint,
     #[error("Failed to decode commit block: {0}")]
@@ -176,7 +176,7 @@ impl Walker {
         &mut self,
         blocks: &mut HashMap<Cid, MaybeProcessedBlock<T>>,
         process: impl Fn(Vec<u8>) -> T,
-    ) -> Result<Step<T>, Trip> {
+    ) -> Result<Step<T>, WalkError> {
         loop {
             let Some(need) = self.stack.last_mut() else {
                 log::trace!("tried to walk but we're actually done.");
@@ -192,10 +192,10 @@ impl Walker {
                     };
 
                     let MaybeProcessedBlock::Raw(data) = block else {
-                        return Err(Trip::BadCommitFingerprint);
+                        return Err(WalkError::BadCommitFingerprint);
                     };
-                    let node =
-                        serde_ipld_dagcbor::from_slice::<Node>(&data).map_err(Trip::BadCommit)?;
+                    let node = serde_ipld_dagcbor::from_slice::<Node>(&data)
+                        .map_err(WalkError::BadCommit)?;
 
                     // found node, make sure we remember
                     self.stack.pop();
@@ -205,8 +205,9 @@ impl Walker {
                 }
                 Need::Record { rkey, cid } => {
                     log::trace!("need record {cid:?}");
+                    // note that we cannot *remove* a record block, sadly, since
+                    // there can be multiple rkeys pointing to the same cid.
                     let Some(data) = blocks.get_mut(cid) else {
-                        log::trace!("record block not found, resting");
                         return Ok(Step::Missing(*cid));
                     };
                     let rkey = rkey.clone();
@@ -217,8 +218,6 @@ impl Walker {
 
                     // found node, make sure we remember
                     self.stack.pop();
-
-                    log::trace!("emitting a block as a step. depth={}", self.stack.len());
 
                     // rkeys *must* be in order or else the tree is invalid (or
                     // we have a bug)
@@ -238,7 +237,7 @@ impl Walker {
         &mut self,
         reader: &mut SqliteReader,
         process: impl Fn(Vec<u8>) -> T,
-    ) -> Result<Step<T>, Trip> {
+    ) -> Result<Step<T>, WalkError> {
         loop {
             let Some(need) = self.stack.last_mut() else {
                 log::trace!("tried to walk but we're actually done.");
@@ -257,16 +256,16 @@ impl Walker {
                     let block: MaybeProcessedBlock<T> = crate::drive::decode(&block_bytes)?;
 
                     let MaybeProcessedBlock::Raw(data) = block else {
-                        return Err(Trip::BadCommitFingerprint);
+                        return Err(WalkError::BadCommitFingerprint);
                     };
-                    let node =
-                        serde_ipld_dagcbor::from_slice::<Node>(&data).map_err(Trip::BadCommit)?;
+                    let node = serde_ipld_dagcbor::from_slice::<Node>(&data)
+                        .map_err(WalkError::BadCommit)?;
 
                     // found node, make sure we remember
                     self.stack.pop();
 
                     // queue up work on the found node next
-                    push_from_node(&mut self.stack, &node, depth).map_err(Trip::MstError)?;
+                    push_from_node(&mut self.stack, &node, depth).map_err(WalkError::MstError)?;
                 }
                 Need::Record { rkey, cid } => {
                     log::trace!("need record {cid:?}");
