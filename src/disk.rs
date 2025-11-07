@@ -47,6 +47,10 @@ impl SqliteStore {
         let select_stmt = self.conn.prepare("SELECT val FROM blocks WHERE key = ?1")?;
         Ok(SqliteReader { select_stmt })
     }
+    pub fn reset(&mut self) -> Result<(), rusqlite::Error> {
+        self.conn.execute("DROP TABLE blocks", ())?;
+        Ok(())
+    }
 }
 
 pub struct SqliteWriter<'conn> {

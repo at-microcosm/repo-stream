@@ -2,11 +2,12 @@
 //!
 //! For now see the [examples](https://tangled.org/@microcosm.blue/repo-stream/tree/main/examples)
 
+mod mst;
+mod walk;
+
 pub mod disk;
 pub mod drive;
-pub mod mst;
 pub mod process;
-pub mod walk;
 
 pub use disk::SqliteStore;
 pub use drive::{DriveError, Driver};

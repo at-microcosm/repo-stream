@@ -3,8 +3,6 @@ use clap::Parser;
 use repo_stream::{Driver, noop};
 use std::path::PathBuf;
 
-type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
-
 #[derive(Debug, Parser)]
 struct Args {
     #[arg()]
@@ -14,47 +12,77 @@ struct Args {
 }
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init();
 
     let Args { car, tmpfile } = Args::parse();
+
+    // repo-stream takes an AsyncRead as input. wrapping a filesystem read in
+    // BufReader can provide a really significant performance win.
     let reader = tokio::fs::File::open(car).await?;
     let reader = tokio::io::BufReader::new(reader);
 
-    // let kb = 2_usize.pow(10);
-    let mb = 2_usize.pow(20);
+    // configure how much memory can be used before spilling to disk.
+    // real memory usage may differ somewhat.
+    let in_mem_limit = 10 * 2_usize.pow(20);
 
-    let limit_mb = 32;
+    // configure how much memory sqlite is allowed to use when dumping to disk
+    let db_cache_mb = 32;
 
-    let driver = match Driver::load_car(reader, noop, 10 * mb).await? {
+    log::info!("hello! reading the car...");
+
+    // in this example we only bother handling CARs that are too big for memory
+    // `noop` helper means: do no block processing, store the raw blocks
+    let driver = match Driver::load_car(reader, noop, in_mem_limit).await? {
         Driver::Lil(_, _) => panic!("try this on a bigger car"),
         Driver::Big(big_stuff) => {
-            let disk_store = repo_stream::disk::SqliteStore::new(tmpfile.clone(), limit_mb).await?;
+            // we reach here if the repo was too big and needs to be spilled to
+            // disk to continue
+
+            // set up a disk store we can spill to
+            let disk_store =
+                repo_stream::disk::SqliteStore::new(tmpfile.clone(), db_cache_mb).await?;
+
+            // do the spilling, get back a (similar) driver
             let (commit, driver) = big_stuff.finish_loading(disk_store).await?;
-            log::warn!("big: {:?}", commit);
+
+            // at this point you might want to fetch the account's signing key
+            // via the DID from the commit, and then verify the signature.
+            log::warn!("big's comit: {:?}", commit);
+
+            // pop the driver back out to get some code indentation relief
             driver
         }
     };
 
+    // collect some random stats about the blocks
     let mut n = 0;
     let mut zeros = 0;
-    let mut rx = driver.to_channel(512);
 
-    log::debug!("walking...");
+    log::info!("walking...");
+
+    // this example uses the disk driver's channel mode: the tree walking is
+    // spawned onto a blocking thread, and we get chunks of rkey+blocks back
+    let (mut rx, join) = driver.to_channel(512);
     while let Some(r) = rx.recv().await {
         let pairs = r?;
+
+        // keep a count of the total number of blocks seen
         n += pairs.len();
+
         for (_, block) in pairs {
+            // for each block, count how many bytes are equal to '0'
+            // (this is just an example, you probably want to do something more
+            // interesting)
             zeros += block.into_iter().filter(|&b| b == b'0').count()
         }
     }
-    log::debug!("done walking!");
 
-    // log::info!("now is the time to check mem...");
-    // tokio::time::sleep(std::time::Duration::from_secs(22)).await;
-    log::info!("bye! n={n} zeros={zeros}");
+    log::info!("arrived! joining rx...");
 
-    std::fs::remove_file(tmpfile).unwrap(); // need to also remove -shm -wal
+    join.await?.reset_store().await?;
+
+    log::info!("done. n={n} zeros={zeros}");
 
     Ok(())
 }

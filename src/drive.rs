@@ -90,6 +90,16 @@ impl<T: Processable> Processable for MaybeProcessedBlock<T> {
     }
 }
 
+impl<T> MaybeProcessedBlock<T> {
+    fn maybe(process: fn(Vec<u8>) -> T, data: Vec<u8>) -> Self {
+        if Node::could_be(&data) {
+            MaybeProcessedBlock::Raw(data)
+        } else {
+            MaybeProcessedBlock::Processed(process(data))
+        }
+    }
+}
+
 pub enum Driver<R: AsyncRead + Unpin, T: Processable> {
     Lil(Commit, MemDriver<T>),
     Big(BigCar<R, T>),
@@ -126,11 +136,7 @@ impl<R: AsyncRead + Unpin, T: Processable> Driver<R, T> {
             }
 
             // remaining possible types: node, record, other. optimistically process
-            let maybe_processed = if Node::could_be(&data) {
-                MaybeProcessedBlock::Raw(data)
-            } else {
-                MaybeProcessedBlock::Processed(process(data))
-            };
+            let maybe_processed = MaybeProcessedBlock::maybe(process, data);
 
             // stash (maybe processed) blocks in memory as long as we have room
             mem_size += std::mem::size_of::<Cid>() + maybe_processed.get_size();
@@ -192,7 +198,7 @@ impl<T: Processable> MemDriver<T> {
             match self.walker.step(&mut self.blocks, self.process)? {
                 Step::Missing(cid) => return Err(DriveError::MissingBlock(cid)),
                 Step::Finish => break,
-                Step::Step { rkey, data } => {
+                Step::Found { rkey, data } => {
                     out.push((rkey, data));
                     continue;
                 }
@@ -283,11 +289,7 @@ impl<R: AsyncRead + Unpin, T: Processable + Send + 'static> BigCar<R, T> {
                 }
                 // remaining possible types: node, record, other. optimistically process
                 // TODO: get the actual in-memory size to compute disk spill
-                let maybe_processed = if Node::could_be(&data) {
-                    MaybeProcessedBlock::Raw(data)
-                } else {
-                    MaybeProcessedBlock::Processed((self.process)(data))
-                };
+                let maybe_processed = MaybeProcessedBlock::maybe(self.process, data);
                 mem_size += std::mem::size_of::<Cid>() + maybe_processed.get_size();
                 chunk.push((cid, maybe_processed));
                 if mem_size >= self.max_size {
@@ -347,7 +349,7 @@ impl<T: Processable + Send + 'static> BigCarReady<T> {
                 match self.walker.disk_step(&mut reader, self.process)? {
                     Step::Missing(cid) => return Err(DriveError::MissingBlock(cid)),
                     Step::Finish => break,
-                    Step::Step { rkey, data } => {
+                    Step::Found { rkey, data } => {
                         out.push((rkey, data));
                         continue;
                     }
@@ -368,7 +370,7 @@ impl<T: Processable + Send + 'static> BigCarReady<T> {
     }
 
     fn read_tx_blocking(
-        mut self,
+        &mut self,
         n: usize,
         tx: mpsc::Sender<Result<BlockChunk<T>, DriveError>>,
     ) -> Result<(), mpsc::error::SendError<Result<BlockChunk<T>, DriveError>>> {
@@ -393,7 +395,7 @@ impl<T: Processable + Send + 'static> BigCarReady<T> {
                         return tx.blocking_send(Err(DriveError::MissingBlock(cid)));
                     }
                     Step::Finish => return Ok(()),
-                    Step::Step { rkey, data } => {
+                    Step::Found { rkey, data } => {
                         out.push((rkey, data));
                         continue;
                     }
@@ -409,16 +411,31 @@ impl<T: Processable + Send + 'static> BigCarReady<T> {
         Ok(())
     }
 
-    pub fn to_channel(self, n: usize) -> mpsc::Receiver<Result<BlockChunk<T>, DriveError>> {
+    pub fn to_channel(
+        mut self,
+        n: usize,
+    ) -> (
+        mpsc::Receiver<Result<BlockChunk<T>, DriveError>>,
+        tokio::task::JoinHandle<Self>,
+    ) {
         let (tx, rx) = mpsc::channel::<Result<BlockChunk<T>, DriveError>>(1);
 
         // sketch: this worker is going to be allowed to execute without a join handle
-        tokio::task::spawn_blocking(move || {
+        let chan_task = tokio::task::spawn_blocking(move || {
             if let Err(mpsc::error::SendError(_)) = self.read_tx_blocking(n, tx) {
                 log::debug!("big car reader exited early due to dropped receiver channel");
             }
+            self
         });
 
-        rx
+        (rx, chan_task)
+    }
+
+    pub async fn reset_store(mut self) -> Result<SqliteStore, DriveError> {
+        tokio::task::spawn_blocking(move || {
+            self.store.reset()?;
+            Ok(self.store)
+        })
+        .await?
     }
 }

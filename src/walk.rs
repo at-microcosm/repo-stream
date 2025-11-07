@@ -51,7 +51,7 @@ pub enum Step<T> {
     /// Reached the end of the MST! yay!
     Finish,
     /// A record was found!
-    Step { rkey: String, data: T },
+    Found { rkey: String, data: T },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -227,7 +227,7 @@ impl Walker {
                     }
                     self.prev = rkey.clone();
 
-                    return Ok(Step::Step { rkey, data });
+                    return Ok(Step::Found { rkey, data });
                 }
             }
         }
@@ -294,7 +294,7 @@ impl Walker {
                     }
                     self.prev = rkey.clone();
 
-                    return Ok(Step::Step { rkey, data });
+                    return Ok(Step::Found { rkey, data });
                 }
             }
         }
