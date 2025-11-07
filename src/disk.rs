@@ -53,7 +53,7 @@ impl SqliteAccess {
     pub fn get_writer(&'_ mut self) -> Result<SqliteWriter<'_>, rusqlite::Error> {
         let tx = self.conn.transaction()?;
         // let insert_stmt = tx.prepare("INSERT INTO blocks (key, val) VALUES (?1, ?2)")?;
-        Ok(SqliteWriter { tx: Some(tx) })
+        Ok(SqliteWriter { tx })
     }
     pub fn get_reader(&'_ self) -> Result<SqliteReader<'_>, rusqlite::Error> {
         let select_stmt = self.conn.prepare("SELECT val FROM blocks WHERE key = ?1")?;
@@ -62,15 +62,7 @@ impl SqliteAccess {
 }
 
 pub struct SqliteWriter<'conn> {
-    tx: Option<rusqlite::Transaction<'conn>>,
-}
-
-/// oops careful in async
-impl Drop for SqliteWriter<'_> {
-    fn drop(&mut self) {
-        let tx = self.tx.take();
-        tx.unwrap().commit().unwrap();
-    }
+    tx: rusqlite::Transaction<'conn>,
 }
 
 impl SqliteWriter<'_> {
@@ -78,12 +70,17 @@ impl SqliteWriter<'_> {
         &mut self,
         kv: impl Iterator<Item = Result<(Vec<u8>, Vec<u8>), DriveError>>,
     ) -> Result<(), DriveError> {
-        let tx = self.tx.as_ref().unwrap();
-        let mut insert_stmt = tx.prepare_cached("INSERT INTO blocks (key, val) VALUES (?1, ?2)")?;
+        let mut insert_stmt = self
+            .tx
+            .prepare_cached("INSERT INTO blocks (key, val) VALUES (?1, ?2)")?;
         for pair in kv {
             let (k, v) = pair?;
             insert_stmt.execute((k, v))?;
         }
+        Ok(())
+    }
+    pub fn commit(self) -> Result<(), rusqlite::Error> {
+        self.tx.commit()?;
         Ok(())
     }
 }

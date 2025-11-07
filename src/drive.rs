@@ -197,8 +197,7 @@ impl<R: AsyncRead + Unpin, T: Processable + Send + 'static> BigCar<R, T> {
                 .map(|(k, v)| Ok(encode(v).map(|v| (k.to_bytes(), v))?));
 
             writer.put_many(kvs)?;
-
-            drop(writer); // cannot outlive access
+            writer.commit()?;
             Ok::<_, DriveError>(access)
         })
         .await??;
@@ -215,7 +214,7 @@ impl<R: AsyncRead + Unpin, T: Processable + Send + 'static> BigCar<R, T> {
                 writer.put_many(kvs)?;
             }
 
-            drop(writer); // cannot outlive access
+            writer.commit()?;
             Ok::<_, DriveError>(access)
         }); // await later
 
