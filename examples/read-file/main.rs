@@ -1,3 +1,7 @@
+/*!
+Read a CAR file with in-memory processing
+*/
+
 extern crate repo_stream;
 use clap::Parser;
 use repo_stream::Driver;
@@ -20,9 +24,9 @@ async fn main() -> Result<()> {
     let reader = tokio::io::BufReader::new(reader);
 
     let (commit, mut driver) =
-        match Driver::load_car(reader, |block| block.len(), 16 * 1024 * 1024).await? {
-            Driver::Lil(commit, mem_driver) => (commit, mem_driver),
-            Driver::Big(_) => panic!("can't handle big cars yet"),
+        match Driver::load_car(reader, |block| block.len(), 16 /* MiB */).await? {
+            Driver::Memory(commit, mem_driver) => (commit, mem_driver),
+            Driver::Disk(_) => panic!("this example doesn't handle big CARs"),
         };
 
     log::info!("got commit: {commit:?}");
@@ -32,7 +36,7 @@ async fn main() -> Result<()> {
         n += pairs.len();
         // log::info!("got {rkey:?}");
     }
-    log::info!("bye! {n}");
+    log::info!("bye! total records={n}");
 
     Ok(())
 }

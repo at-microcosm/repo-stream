@@ -43,7 +43,7 @@ impl SqliteStore {
         // let insert_stmt = tx.prepare("INSERT INTO blocks (key, val) VALUES (?1, ?2)")?;
         Ok(SqliteWriter { tx })
     }
-    pub fn get_reader(&'_ self) -> Result<SqliteReader<'_>, rusqlite::Error> {
+    pub fn get_reader<'conn>(&'conn self) -> Result<SqliteReader<'conn>, rusqlite::Error> {
         let select_stmt = self.conn.prepare("SELECT val FROM blocks WHERE key = ?1")?;
         Ok(SqliteReader { select_stmt })
     }

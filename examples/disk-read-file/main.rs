@@ -1,6 +1,10 @@
+/*!
+Read a CAR file by spilling to disk
+*/
+
 extern crate repo_stream;
 use clap::Parser;
-use repo_stream::{Driver, noop};
+use repo_stream::{Driver, process::noop};
 use std::path::PathBuf;
 
 #[derive(Debug, Parser)]
@@ -24,18 +28,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // configure how much memory can be used before spilling to disk.
     // real memory usage may differ somewhat.
-    let in_mem_limit = 10 * 2_usize.pow(20);
+    let in_mem_limit = 10; // MiB
 
     // configure how much memory sqlite is allowed to use when dumping to disk
-    let db_cache_mb = 32;
+    let db_cache_mb = 32; // MiB
 
     log::info!("hello! reading the car...");
 
     // in this example we only bother handling CARs that are too big for memory
     // `noop` helper means: do no block processing, store the raw blocks
     let driver = match Driver::load_car(reader, noop, in_mem_limit).await? {
-        Driver::Lil(_, _) => panic!("try this on a bigger car"),
-        Driver::Big(big_stuff) => {
+        Driver::Memory(_, _) => panic!("try this on a bigger car"),
+        Driver::Disk(big_stuff) => {
             // we reach here if the repo was too big and needs to be spilled to
             // disk to continue
 
@@ -80,6 +84,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     log::info!("arrived! joining rx...");
 
+    // clean up the database. would be nice to do this in drop so it happens
+    // automatically, but some blocking work happens, so that's not allowed in
+    // async rust. 🤷‍♀️
     join.await?.reset_store().await?;
 
     log::info!("done. n={n} zeros={zeros}");

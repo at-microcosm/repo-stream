@@ -25,12 +25,12 @@ pub fn criterion_benchmark(c: &mut Criterion) {
 }
 
 async fn drive_car(bytes: &[u8]) -> usize {
-    let mut driver = match Driver::load_car(bytes, |block| block.len(), 32 * 2_usize.pow(20))
+    let mut driver = match Driver::load_car(bytes, |block| block.len(), 32)
         .await
         .unwrap()
     {
-        Driver::Lil(_, mem_driver) => mem_driver,
-        Driver::Big(_) => panic!("not benching big cars here"),
+        Driver::Memory(_, mem_driver) => mem_driver,
+        Driver::Disk(_) => panic!("not benching big cars here"),
     };
 
     let mut n = 0;

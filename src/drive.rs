@@ -101,16 +101,17 @@ impl<T> MaybeProcessedBlock<T> {
 }
 
 pub enum Driver<R: AsyncRead + Unpin, T: Processable> {
-    Lil(Commit, MemDriver<T>),
-    Big(BigCar<R, T>),
+    Memory(Commit, MemDriver<T>),
+    Disk(BigCar<R, T>),
 }
 
 impl<R: AsyncRead + Unpin, T: Processable> Driver<R, T> {
     pub async fn load_car(
         reader: R,
         process: fn(Vec<u8>) -> T,
-        max_size: usize,
+        max_size_mb: usize,
     ) -> Result<Driver<R, T>, DriveError> {
+        let max_size = max_size_mb * 2_usize.pow(20);
         let mut mem_blocks = HashMap::new();
 
         let mut car = CarReader::new(reader).await?;
@@ -142,7 +143,7 @@ impl<R: AsyncRead + Unpin, T: Processable> Driver<R, T> {
             mem_size += std::mem::size_of::<Cid>() + maybe_processed.get_size();
             mem_blocks.insert(cid, maybe_processed);
             if mem_size >= max_size {
-                return Ok(Driver::Big(BigCar {
+                return Ok(Driver::Disk(BigCar {
                     car,
                     root,
                     process,
@@ -158,7 +159,7 @@ impl<R: AsyncRead + Unpin, T: Processable> Driver<R, T> {
 
         let walker = Walker::new(commit.data);
 
-        Ok(Driver::Lil(
+        Ok(Driver::Memory(
             commit,
             MemDriver {
                 blocks: mem_blocks,
@@ -321,51 +322,94 @@ impl<R: AsyncRead + Unpin, T: Processable + Send + 'static> BigCar<R, T> {
             commit,
             BigCarReady {
                 process: self.process,
-                store,
-                walker,
+                state: Some(BigState { store, walker }),
             },
         ))
     }
 }
 
-pub struct BigCarReady<T: Clone> {
-    process: fn(Vec<u8>) -> T,
+struct BigState {
     store: SqliteStore,
     walker: Walker,
 }
 
-impl<T: Processable + Send + 'static> BigCarReady<T> {
-    pub async fn next_chunk(
-        mut self,
-        n: usize,
-    ) -> Result<(Self, Option<BlockChunk<T>>), DriveError> {
-        let mut out = Vec::with_capacity(n);
-        (self, out) = tokio::task::spawn_blocking(move || {
-            let store = self.store;
-            let mut reader = store.get_reader()?;
+pub struct BigCarReady<T: Clone> {
+    process: fn(Vec<u8>) -> T,
+    state: Option<BigState>,
+}
 
-            for _ in 0..n {
-                // walk as far as we can until we run out of blocks or find a record
-                match self.walker.disk_step(&mut reader, self.process)? {
-                    Step::Missing(cid) => return Err(DriveError::MissingBlock(cid)),
-                    Step::Finish => break,
-                    Step::Found { rkey, data } => {
-                        out.push((rkey, data));
-                        continue;
+impl<T: Processable + Send + 'static> BigCarReady<T> {
+    pub async fn next_chunk(&mut self, n: usize) -> Result<Option<BlockChunk<T>>, DriveError> {
+        let process = self.process;
+
+        // state should only *ever* be None transiently while inside here
+        let mut state = self
+            .state
+            .take()
+            .expect("BigCarReady must have Some(state)");
+
+        // the big pain here is that we don't want to leave self.state in an
+        // invalid state (None), so all the error paths have to make sure it
+        // comes out again.
+        let (state, res) = tokio::task::spawn_blocking(
+            move || -> (BigState, Result<BlockChunk<T>, DriveError>) {
+                let mut reader_res = state.store.get_reader();
+                let reader: &mut _ = match reader_res {
+                    Ok(ref mut r) => r,
+                    Err(ref mut e) => {
+                        // unfortunately we can't return the error directly because
+                        // (for some reason) it's attached to the lifetime of the
+                        // reader?
+                        // hack a mem::swap so we can get it out :/
+                        let mut e_swapped =
+                            rusqlite::Error::InvalidParameterName("this error was stolen".into());
+                        std::mem::swap(e, &mut e_swapped);
+                        // the pain: `state` *has to* outlive the reader
+                        drop(reader_res);
+                        return (state, Err(e_swapped.into()));
                     }
                 };
-            }
 
-            drop(reader); // cannot outlive store
-            self.store = store;
-            Ok::<_, DriveError>((self, out))
-        })
-        .await??;
+                let mut out = Vec::with_capacity(n);
+
+                for _ in 0..n {
+                    // walk as far as we can until we run out of blocks or find a record
+                    let step = match state.walker.disk_step(reader, process) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            // the pain: `state` *has to* outlive the reader
+                            drop(reader_res);
+                            return (state, Err(e.into()));
+                        }
+                    };
+                    match step {
+                        Step::Missing(cid) => {
+                            // the pain: `state` *has to* outlive the reader
+                            drop(reader_res);
+                            return (state, Err(DriveError::MissingBlock(cid)));
+                        }
+                        Step::Finish => break,
+                        Step::Found { rkey, data } => out.push((rkey, data)),
+                    };
+                }
+
+                // `state` *has to* outlive the reader
+                drop(reader_res);
+
+                (state, Ok::<_, DriveError>(out))
+            },
+        )
+        .await?; // on tokio JoinError, we'll be left with invalid state :(
+
+        // *must* restore state before dealing with the actual result
+        self.state = Some(state);
+
+        let out = res?;
 
         if out.is_empty() {
-            Ok((self, None))
+            Ok(None)
         } else {
-            Ok((self, Some(out)))
+            Ok(Some(out))
         }
     }
 
@@ -374,7 +418,8 @@ impl<T: Processable + Send + 'static> BigCarReady<T> {
         n: usize,
         tx: mpsc::Sender<Result<BlockChunk<T>, DriveError>>,
     ) -> Result<(), mpsc::error::SendError<Result<BlockChunk<T>, DriveError>>> {
-        let mut reader = match self.store.get_reader() {
+        let BigState { store, walker } = self.state.as_mut().expect("valid state");
+        let mut reader = match store.get_reader() {
             Ok(r) => r,
             Err(e) => return tx.blocking_send(Err(e.into())),
         };
@@ -385,7 +430,7 @@ impl<T: Processable + Send + 'static> BigCarReady<T> {
             for _ in 0..n {
                 // walk as far as we can until we run out of blocks or find a record
 
-                let step = match self.walker.disk_step(&mut reader, self.process) {
+                let step = match walker.disk_step(&mut reader, self.process) {
                     Ok(s) => s,
                     Err(e) => return tx.blocking_send(Err(e.into())),
                 };
@@ -433,8 +478,9 @@ impl<T: Processable + Send + 'static> BigCarReady<T> {
 
     pub async fn reset_store(mut self) -> Result<SqliteStore, DriveError> {
         tokio::task::spawn_blocking(move || {
-            self.store.reset()?;
-            Ok(self.store)
+            let BigState { mut store, .. } = self.state.take().expect("valid state");
+            store.reset()?;
+            Ok(store)
         })
         .await?
     }
