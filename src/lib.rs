@@ -18,7 +18,7 @@ Some MST validations are applied
 `iroh_car` additionally applies a block size limit of `2MiB`.
 
 ```
-use repo_stream::{Driver, SqliteStore};
+use repo_stream::{Driver, DiskStore};
 
 # #[tokio::main]
 # async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -42,7 +42,7 @@ match Driver::load_car(reader, process, in_mem_limit).await? {
     // if the CAR was too big for in-memory processing
     Driver::Disk(paused) => {
         // set up a disk store we can spill to
-        let store = SqliteStore::new("some/path.sqlite".into(), db_cache_size).await?;
+        let store = DiskStore::new("some/path.db".into(), db_cache_size).await?;
         // do the spilling, get back a (similar) driver
         let (_commit, mut driver) = paused.finish_loading(store).await?;
 
@@ -61,6 +61,13 @@ println!("sum of size of all records: {total_size}");
 # }
 ```
 
+Disk spilling suspends and returns a `Driver::Disk(paused)` instead of going
+ahead and eagerly using disk I/O. This means you have to write a bit more code
+to handle both cases, but it allows you to have finer control over resource
+usage. For example, you can drive a number of parallel memory CAR workers, and
+separately have a different number of disk workers picking up suspended disk
+tasks from a queue.
+
 Find more [examples in the repo](https://tangled.org/@microcosm.blue/repo-stream/tree/main/examples).
 
 */
@@ -72,7 +79,7 @@ pub mod disk;
 pub mod drive;
 pub mod process;
 
-pub use disk::SqliteStore;
+pub use disk::{DiskError, DiskStore};
 pub use drive::{DriveError, Driver};
 pub use mst::Commit;
 pub use process::Processable;

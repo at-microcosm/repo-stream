@@ -1,6 +1,6 @@
 //! Consume a CAR from an AsyncRead, producing an ordered stream of records
 
-use crate::disk::SqliteStore;
+use crate::disk::{DiskError, DiskStore};
 use crate::process::Processable;
 use ipld_core::cid::Cid;
 use iroh_car::CarReader;
@@ -28,7 +28,7 @@ pub enum DriveError {
     #[error("CAR file had no roots")]
     MissingRoot,
     #[error("Storage error")]
-    StorageError(#[from] rusqlite::Error),
+    StorageError(#[from] DiskError),
     #[error("Encode error: {0}")]
     BincodeEncodeError(#[from] bincode::error::EncodeError),
     #[error("Tried to send on a closed channel")]
@@ -45,10 +45,11 @@ pub enum DecodeError {
     ExtraGarbage,
 }
 
+/// An in-order chunk of Rkey + (processed) Block pairs
 pub type BlockChunk<T> = Vec<(String, T)>;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum MaybeProcessedBlock<T> {
+pub(crate) enum MaybeProcessedBlock<T> {
     /// A block that's *probably* a Node (but we can't know yet)
     ///
     /// It *can be* a record that suspiciously looks a lot like a node, so we
@@ -100,7 +101,7 @@ impl<T> MaybeProcessedBlock<T> {
     }
 }
 
-/// Read a CAR file buffering blocks in memory or to disk
+/// Read a CAR file, buffering blocks in memory or to disk
 pub enum Driver<R: AsyncRead + Unpin, T: Processable> {
     /// All blocks fit within the memory limit
     ///
@@ -115,6 +116,15 @@ pub enum Driver<R: AsyncRead + Unpin, T: Processable> {
 }
 
 impl<R: AsyncRead + Unpin, T: Processable> Driver<R, T> {
+    /// Begin processing an atproto MST from a CAR file
+    ///
+    /// Blocks will be loaded, processed, and buffered in memory. If the entire
+    /// processed size is under the `max_size_mb` limit, a `Driver::Memory` will
+    /// be returned along with a `Commit` ready for validation.
+    ///
+    /// If the `max_size_mb` limit is reached before loading all blocks, the
+    /// partial state will be returned as `Driver::Disk(needed)`, which can be
+    /// resumed by providing a `SqliteStorage` for on-disk block storage.
     pub async fn load_car(
         reader: R,
         process: fn(Vec<u8>) -> T,
@@ -200,7 +210,7 @@ pub struct MemDriver<T: Processable> {
 }
 
 impl<T: Processable> MemDriver<T> {
-    /// Manually step through the record outputs
+    /// Step through the record outputs, in rkey order
     pub async fn next_chunk(&mut self, n: usize) -> Result<Option<BlockChunk<T>>, DriveError> {
         let mut out = Vec::with_capacity(n);
         for _ in 0..n {
@@ -223,7 +233,7 @@ impl<T: Processable> MemDriver<T> {
     }
 }
 
-/// A paritally memory-loaded car file that needs disk spillover to continue
+/// A partially memory-loaded car file that needs disk spillover to continue
 pub struct NeedDisk<R: AsyncRead + Unpin, T: Processable> {
     car: CarReader<R>,
     root: Cid,
@@ -237,7 +247,7 @@ fn encode(v: impl Serialize) -> Result<Vec<u8>, bincode::error::EncodeError> {
     bincode::serde::encode_to_vec(v, bincode::config::standard())
 }
 
-pub fn decode<T: Processable>(bytes: &[u8]) -> Result<T, DecodeError> {
+pub(crate) fn decode<T: Processable>(bytes: &[u8]) -> Result<T, DecodeError> {
     let (t, n) = bincode::serde::decode_from_slice(bytes, bincode::config::standard())?;
     if n != bytes.len() {
         return Err(DecodeError::ExtraGarbage);
@@ -248,7 +258,7 @@ pub fn decode<T: Processable>(bytes: &[u8]) -> Result<T, DecodeError> {
 impl<R: AsyncRead + Unpin, T: Processable + Send + 'static> NeedDisk<R, T> {
     pub async fn finish_loading(
         mut self,
-        mut store: SqliteStore,
+        mut store: DiskStore,
     ) -> Result<(Commit, DiskDriver<T>), DriveError> {
         // move store in and back out so we can manage lifetimes
         // dump mem blocks into the store
@@ -338,7 +348,7 @@ impl<R: AsyncRead + Unpin, T: Processable + Send + 'static> NeedDisk<R, T> {
 }
 
 struct BigState {
-    store: SqliteStore,
+    store: DiskStore,
     walker: Walker,
 }
 
@@ -394,9 +404,7 @@ impl<T: Processable + Send + 'static> DiskDriver<T> {
                         // (for some reason) it's attached to the lifetime of the
                         // reader?
                         // hack a mem::swap so we can get it out :/
-                        let mut e_swapped =
-                            rusqlite::Error::InvalidParameterName("this error was stolen".into());
-                        std::mem::swap(e, &mut e_swapped);
+                        let e_swapped = e.steal();
                         // the pain: `state` *has to* outlive the reader
                         drop(reader_res);
                         return (state, Err(e_swapped.into()));
@@ -544,12 +552,8 @@ impl<T: Processable + Send + 'static> DiskDriver<T> {
     ///
     /// The sqlite store is returned, so it can be reused for another
     /// `DiskDriver`.
-    pub async fn reset_store(mut self) -> Result<SqliteStore, DriveError> {
-        tokio::task::spawn_blocking(move || {
-            let BigState { mut store, .. } = self.state.take().expect("valid state");
-            store.reset()?;
-            Ok(store)
-        })
-        .await?
+    pub async fn reset_store(mut self) -> Result<DiskStore, DriveError> {
+        let BigState { store, .. } = self.state.take().expect("valid state");
+        Ok(store.reset().await?)
     }
 }

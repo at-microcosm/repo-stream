@@ -4,7 +4,7 @@ Read a CAR file by spilling to disk
 
 extern crate repo_stream;
 use clap::Parser;
-use repo_stream::{Driver, process::noop};
+use repo_stream::{DiskStore, Driver, process::noop};
 use std::path::PathBuf;
 
 #[derive(Debug, Parser)]
@@ -44,8 +44,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // disk to continue
 
             // set up a disk store we can spill to
-            let disk_store =
-                repo_stream::disk::SqliteStore::new(tmpfile.clone(), db_cache_mb).await?;
+            let disk_store = DiskStore::new(tmpfile.clone(), db_cache_mb).await?;
 
             // do the spilling, get back a (similar) driver
             let (commit, driver) = big_stuff.finish_loading(disk_store).await?;
