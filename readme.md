@@ -4,9 +4,11 @@ A robust CAR file -> MST walker for atproto
 
 [![Crates.io][crates-badge]](https://crates.io/crates/repo-stream)
 [![Documentation][docs-badge]](https://docs.rs/repo-stream)
+[![Sponsor][sponsor-badge]](https://github.com/sponsors/uniphil)
 
 [crates-badge]: https://img.shields.io/crates/v/repo-stream.svg
 [docs-badge]: https://docs.rs/repo-stream/badge.svg
+[sponsor-badge]: https://img.shields.io/badge/at-microcosm-b820f9?labelColor=b820f9&logo=githubsponsors&logoColor=fff
 
 ```rust
 use repo_stream::{Driver, DriverBuilder, DriveError, DiskBuilder};
