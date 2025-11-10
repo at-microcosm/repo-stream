@@ -65,7 +65,7 @@ Find more [examples in the repo](https://tangled.org/@microcosm.blue/repo-stream
 
 */
 
-mod mst;
+pub mod mst;
 mod walk;
 
 pub mod disk;
@@ -74,4 +74,5 @@ pub mod process;
 
 pub use disk::SqliteStore;
 pub use drive::{DriveError, Driver};
+pub use mst::Commit;
 pub use process::Processable;

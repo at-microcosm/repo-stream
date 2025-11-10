@@ -1,10 +1,18 @@
+/*!
+Record processor function output trait
+*/
+
 use serde::{Serialize, de::DeserializeOwned};
 
+/// Output trait for record processing
 pub trait Processable: Clone + Serialize + DeserializeOwned {
-    /// the additional size taken up (not including its mem::size_of)
+    /// Any additional in-memory size taken by the processed type
+    ///
+    /// Do not include stack size (`std::mem::size_of`)
     fn get_size(&self) -> usize;
 }
 
+/// Processor that just returns the raw blocks
 #[inline]
 pub fn noop(block: Vec<u8>) -> Vec<u8> {
     block

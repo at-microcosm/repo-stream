@@ -1,7 +1,25 @@
+/*!
+Sqlite storage for blocks on disk
+
+In testing sqlite wasn't the fastest, but it seemed to be the best behaved in
+terms of both on-disk space usage and memory usage.
+
+```no_run
+# use repo_stream::SqliteStore;
+# #[tokio::main]
+# async fn main() -> Result<(), rusqlite::Error> {
+let db_cache_size = 32; // MiB
+let store = SqliteStore::new("/some/path.sqlite".into(), db_cache_size).await?;
+# Ok(())
+# }
+```
+*/
+
 use crate::drive::DriveError;
 use rusqlite::OptionalExtension;
 use std::path::PathBuf;
 
+/// On-disk block storage
 pub struct SqliteStore {
     conn: rusqlite::Connection,
 }
@@ -38,12 +56,12 @@ impl SqliteStore {
 
         Ok(Self { conn })
     }
-    pub fn get_writer(&'_ mut self) -> Result<SqliteWriter<'_>, rusqlite::Error> {
+    pub(crate) fn get_writer(&'_ mut self) -> Result<SqliteWriter<'_>, rusqlite::Error> {
         let tx = self.conn.transaction()?;
         // let insert_stmt = tx.prepare("INSERT INTO blocks (key, val) VALUES (?1, ?2)")?;
         Ok(SqliteWriter { tx })
     }
-    pub fn get_reader<'conn>(&'conn self) -> Result<SqliteReader<'conn>, rusqlite::Error> {
+    pub(crate) fn get_reader<'conn>(&'conn self) -> Result<SqliteReader<'conn>, rusqlite::Error> {
         let select_stmt = self.conn.prepare("SELECT val FROM blocks WHERE key = ?1")?;
         Ok(SqliteReader { select_stmt })
     }
@@ -53,7 +71,7 @@ impl SqliteStore {
     }
 }
 
-pub struct SqliteWriter<'conn> {
+pub(crate) struct SqliteWriter<'conn> {
     tx: rusqlite::Transaction<'conn>,
 }
 
@@ -77,7 +95,7 @@ impl SqliteWriter<'_> {
     }
 }
 
-pub struct SqliteReader<'conn> {
+pub(crate) struct SqliteReader<'conn> {
     select_stmt: rusqlite::Statement<'conn>,
 }
 

@@ -1,4 +1,4 @@
-//! Consume an MST block stream, producing an ordered stream of records
+//! Consume a CAR from an AsyncRead, producing an ordered stream of records
 
 use crate::disk::SqliteStore;
 use crate::process::Processable;
@@ -100,9 +100,18 @@ impl<T> MaybeProcessedBlock<T> {
     }
 }
 
+/// Read a CAR file buffering blocks in memory or to disk
 pub enum Driver<R: AsyncRead + Unpin, T: Processable> {
+    /// All blocks fit within the memory limit
+    ///
+    /// You probably want to check the commit's signature. You can go ahead and
+    /// walk the MST right away.
     Memory(Commit, MemDriver<T>),
-    Disk(BigCar<R, T>),
+    /// Blocks exceed the memory limit
+    ///
+    /// You'll need to provide a disk storage to continue. The commit will be
+    /// returned and can be validated only once all blocks are loaded.
+    Disk(NeedDisk<R, T>),
 }
 
 impl<R: AsyncRead + Unpin, T: Processable> Driver<R, T> {
@@ -143,7 +152,7 @@ impl<R: AsyncRead + Unpin, T: Processable> Driver<R, T> {
             mem_size += std::mem::size_of::<Cid>() + maybe_processed.get_size();
             mem_blocks.insert(cid, maybe_processed);
             if mem_size >= max_size {
-                return Ok(Driver::Disk(BigCar {
+                return Ok(Driver::Disk(NeedDisk {
                     car,
                     root,
                     process,
@@ -214,8 +223,8 @@ impl<T: Processable> MemDriver<T> {
     }
 }
 
-/// a paritally memory-loaded car file that needs disk spillover to continue
-pub struct BigCar<R: AsyncRead + Unpin, T: Processable> {
+/// A paritally memory-loaded car file that needs disk spillover to continue
+pub struct NeedDisk<R: AsyncRead + Unpin, T: Processable> {
     car: CarReader<R>,
     root: Cid,
     process: fn(Vec<u8>) -> T,
@@ -236,11 +245,11 @@ pub fn decode<T: Processable>(bytes: &[u8]) -> Result<T, DecodeError> {
     Ok(t)
 }
 
-impl<R: AsyncRead + Unpin, T: Processable + Send + 'static> BigCar<R, T> {
+impl<R: AsyncRead + Unpin, T: Processable + Send + 'static> NeedDisk<R, T> {
     pub async fn finish_loading(
         mut self,
         mut store: SqliteStore,
-    ) -> Result<(Commit, BigCarReady<T>), DriveError> {
+    ) -> Result<(Commit, DiskDriver<T>), DriveError> {
         // move store in and back out so we can manage lifetimes
         // dump mem blocks into the store
         store = tokio::task::spawn(async move {
@@ -320,7 +329,7 @@ impl<R: AsyncRead + Unpin, T: Processable + Send + 'static> BigCar<R, T> {
 
         Ok((
             commit,
-            BigCarReady {
+            DiskDriver {
                 process: self.process,
                 state: Some(BigState { store, walker }),
             },
@@ -333,20 +342,44 @@ struct BigState {
     walker: Walker,
 }
 
-pub struct BigCarReady<T: Clone> {
+/// MST walker that reads from disk instead of an in-memory hashmap
+pub struct DiskDriver<T: Clone> {
     process: fn(Vec<u8>) -> T,
     state: Option<BigState>,
 }
 
-impl<T: Processable + Send + 'static> BigCarReady<T> {
+// for doctests only
+#[doc(hidden)]
+pub fn _get_fake_disk_driver() -> DiskDriver<Vec<u8>> {
+    use crate::process::noop;
+    DiskDriver {
+        process: noop,
+        state: None,
+    }
+}
+
+impl<T: Processable + Send + 'static> DiskDriver<T> {
+    /// Walk the MST returning up to `n` rkey + record pairs
+    ///
+    /// ```no_run
+    /// # use repo_stream::{drive::{DiskDriver, DriveError, _get_fake_disk_driver}, process::noop};
+    /// # #[tokio::main]
+    /// # async fn main() -> Result<(), DriveError> {
+    /// # let mut disk_driver = _get_fake_disk_driver();
+    /// while let Some(pairs) = disk_driver.next_chunk(256).await? {
+    ///     for (rkey, record) in pairs {
+    ///         println!("{rkey}: size={}", record.len());
+    ///     }
+    /// }
+    /// let store = disk_driver.reset_store().await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn next_chunk(&mut self, n: usize) -> Result<Option<BlockChunk<T>>, DriveError> {
         let process = self.process;
 
         // state should only *ever* be None transiently while inside here
-        let mut state = self
-            .state
-            .take()
-            .expect("BigCarReady must have Some(state)");
+        let mut state = self.state.take().expect("DiskDriver must have Some(state)");
 
         // the big pain here is that we don't want to leave self.state in an
         // invalid state (None), so all the error paths have to make sure it
@@ -456,6 +489,33 @@ impl<T: Processable + Send + 'static> BigCarReady<T> {
         Ok(())
     }
 
+    /// Spawn the disk reading task into a tokio blocking thread
+    ///
+    /// The idea is to avoid so much sending back and forth to the blocking
+    /// thread, letting a blocking task do all the disk reading work and sending
+    /// records and rkeys back through an `mpsc` channel instead.
+    ///
+    /// This might also allow the disk work to continue while processing the
+    /// records. It's still not yet clear if this method actually has much
+    /// benefit over just using `.next_chunk(n)`.
+    ///
+    /// ```no_run
+    /// # use repo_stream::{drive::{DiskDriver, DriveError, _get_fake_disk_driver}, process::noop};
+    /// # #[tokio::main]
+    /// # async fn main() -> Result<(), DriveError> {
+    /// # let mut disk_driver = _get_fake_disk_driver();
+    /// let (mut rx, join) = disk_driver.to_channel(512);
+    /// while let Some(recvd) = rx.recv().await {
+    ///     let pairs = recvd?;
+    ///     for (rkey, record) in pairs {
+    ///         println!("{rkey}: size={}", record.len());
+    ///     }
+    ///
+    /// }
+    /// let store = join.await?.reset_store().await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn to_channel(
         mut self,
         n: usize,
@@ -476,6 +536,14 @@ impl<T: Processable + Send + 'static> BigCarReady<T> {
         (rx, chan_task)
     }
 
+    /// Reset the disk storage so it can be reused. You must call this.
+    ///
+    /// Ideally we'd put this in an `impl Drop`, but since it makes blocking
+    /// calls, that would be risky in an async context. For now you just have to
+    /// carefully make sure you call it.
+    ///
+    /// The sqlite store is returned, so it can be reused for another
+    /// `DiskDriver`.
     pub async fn reset_store(mut self) -> Result<SqliteStore, DriveError> {
         tokio::task::spawn_blocking(move || {
             let BigState { mut store, .. } = self.state.take().expect("valid state");
