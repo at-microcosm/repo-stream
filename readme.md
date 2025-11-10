@@ -8,6 +8,55 @@ A robust CAR file -> MST walker for atproto
 [crates-badge]: https://img.shields.io/crates/v/repo-stream.svg
 [docs-badge]: https://docs.rs/repo-stream/badge.svg
 
+```rust
+use repo_stream::{Driver, DriverBuilder, DriveError, DiskBuilder};
+
+#[tokio::main]
+async fn main() -> Result<(), DriveError> {
+    // repo-stream takes any AsyncRead as input, like a tokio::fs::File
+    let reader = tokio::fs::File::open("repo.car".into()).await?;
+    let reader = tokio::io::BufReader::new(reader);
+
+    // example repo workload is simply counting the total record bytes
+    let mut total_size = 0;
+
+    match DriverBuilder::new()
+        .with_mem_limit_mb(10)
+        .with_block_processor(|rec| rec.len()) // block processing: just extract the raw record size
+        .load_car(reader)
+        .await?
+    {
+
+        // if all blocks fit within memory
+        Driver::Memory(_commit, mut driver) => {
+            while let Some(chunk) = driver.next_chunk(256).await? {
+                for (_rkey, size) in chunk {
+                    total_size += size;
+                }
+            }
+        },
+
+        // if the CAR was too big for in-memory processing
+        Driver::Disk(paused) => {
+            // set up a disk store we can spill to
+            let store = DiskBuilder::new().open("some/path.db".into()).await?;
+            // do the spilling, get back a (similar) driver
+            let (_commit, mut driver) = paused.finish_loading(store).await?;
+
+            while let Some(chunk) = driver.next_chunk(256).await? {
+                for (_rkey, size) in chunk {
+                    total_size += size;
+                }
+            }
+
+            // clean up the disk store (drop tables etc)
+            driver.reset_store().await?;
+        }
+    };
+    println!("sum of size of all records: {total_size}");
+    Ok(())
+}
+```
 
 more recent todo
 
