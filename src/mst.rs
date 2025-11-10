@@ -39,7 +39,7 @@ pub struct Commit {
 /// MST node data schema
 #[derive(Debug, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
-pub struct Node {
+pub(crate) struct Node {
     /// link to sub-tree Node on a lower level and with all keys sorting before
     /// keys at this node
     #[serde(rename = "l")]
@@ -62,7 +62,7 @@ impl Node {
     /// so if a block *could be* a node, any record converter must postpone
     /// processing. if it turns out it happens to be a very node-looking record,
     /// well, sorry, it just has to only be processed later when that's known.
-    pub fn could_be(bytes: impl AsRef<[u8]>) -> bool {
+    pub(crate) fn could_be(bytes: impl AsRef<[u8]>) -> bool {
         const NODE_FINGERPRINT: [u8; 3] = [
             0xA2, // map length 2 (for "l" and "e" keys)
             0x61, // text length 1
@@ -83,11 +83,7 @@ impl Node {
     /// with an empty array of entries. This is the only situation in which a
     /// tree may contain an empty leaf node which does not either contain keys
     /// ("entries") or point to a sub-tree containing entries.
-    ///
-    /// TODO: to me this is slightly unclear with respect to `l` (ask someone).
-    /// ...is that what "The top of the tree must not be a an empty node which
-    /// only points to a sub-tree." is referring to?
-    pub fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.left.is_none() && self.entries.is_empty()
     }
 }
@@ -95,7 +91,7 @@ impl Node {
 /// TreeEntry object
 #[derive(Debug, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
-pub struct Entry {
+pub(crate) struct Entry {
     /// count of bytes shared with previous TreeEntry in this Node (if any)
     #[serde(rename = "p")]
     pub prefix_len: usize,

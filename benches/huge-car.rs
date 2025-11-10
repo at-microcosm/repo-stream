@@ -1,7 +1,5 @@
 extern crate repo_stream;
-use futures::TryStreamExt;
-use iroh_car::CarReader;
-use std::convert::Infallible;
+use repo_stream::Driver;
 use std::path::{Path, PathBuf};
 
 use criterion::{Criterion, criterion_group, criterion_main};
@@ -20,30 +18,23 @@ pub fn criterion_benchmark(c: &mut Criterion) {
     });
 }
 
-async fn drive_car(filename: impl AsRef<Path>) {
+async fn drive_car(filename: impl AsRef<Path>) -> usize {
     let reader = tokio::fs::File::open(filename).await.unwrap();
     let reader = tokio::io::BufReader::new(reader);
-    let reader = CarReader::new(reader).await.unwrap();
 
-    let root = reader
-        .header()
-        .roots()
-        .first()
-        .ok_or("missing root")
+    let mut driver = match Driver::load_car(reader, |block| block.len(), 1024)
+        .await
         .unwrap()
-        .clone();
+    {
+        Driver::Memory(_, mem_driver) => mem_driver,
+        Driver::Disk(_) => panic!("not doing disk for benchmark"),
+    };
 
-    let stream = std::pin::pin!(reader.stream());
-
-    let (_commit, v) =
-        repo_stream::drive::Vehicle::init(root, stream, |block| Ok::<_, Infallible>(block.len()))
-            .await
-            .unwrap();
-    let mut record_stream = std::pin::pin!(v.stream());
-
-    while let Some(_) = record_stream.try_next().await.unwrap() {
-        // just here for the drive
+    let mut n = 0;
+    while let Some(pairs) = driver.next_chunk(256).await.unwrap() {
+        n += pairs.len();
     }
+    n
 }
 
 criterion_group!(benches, criterion_benchmark);
