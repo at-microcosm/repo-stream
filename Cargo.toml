@@ -3,7 +3,7 @@ name = "repo-stream"
 version = "0.1.1"
 edition = "2024"
 license = "MIT OR Apache-2.0"
-description = "Fast and robust atproto CAR file processing in rust"
+description = "A robust CAR file -> MST walker for atproto"
 repository = "https://tangled.org/@microcosm.blue/repo-stream"
 
 [dependencies]

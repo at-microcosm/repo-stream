@@ -1,6 +1,13 @@
 # repo-stream
 
-Efficient and robust atproto CAR file processing in rust
+A robust CAR file -> MST walker for atproto
+
+[![Crates.io][crates-badge]](https://crates.io/crates/repo-stream)
+[![Documentation][docs-badge]](https://docs.rs/repo-stream)
+
+[crates-badge]: https://img.shields.io/crates/v/repo-stream.svg
+[docs-badge]: https://docs.rs/repo-stream/badge.svg
+
 
 todo
 
