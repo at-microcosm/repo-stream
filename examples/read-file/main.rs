@@ -4,7 +4,7 @@ Read a CAR file with in-memory processing
 
 extern crate repo_stream;
 use clap::Parser;
-use repo_stream::Driver;
+use repo_stream::{Driver, DriverBuilder};
 use std::path::PathBuf;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -23,11 +23,14 @@ async fn main() -> Result<()> {
     let reader = tokio::fs::File::open(file).await?;
     let reader = tokio::io::BufReader::new(reader);
 
-    let (commit, mut driver) =
-        match Driver::load_car(reader, |block| block.len(), 16 /* MiB */).await? {
-            Driver::Memory(commit, mem_driver) => (commit, mem_driver),
-            Driver::Disk(_) => panic!("this example doesn't handle big CARs"),
-        };
+    let (commit, mut driver) = match DriverBuilder::new()
+        .with_block_processor(|block| block.len())
+        .load_car(reader)
+        .await?
+    {
+        Driver::Memory(commit, mem_driver) => (commit, mem_driver),
+        Driver::Disk(_) => panic!("this example doesn't handle big CARs"),
+    };
 
     log::info!("got commit: {commit:?}");
 

@@ -18,17 +18,19 @@ Some MST validations are applied
 `iroh_car` additionally applies a block size limit of `2MiB`.
 
 ```
-use repo_stream::{Driver, DiskStore};
+use repo_stream::{Driver, DriverBuilder, DiskBuilder};
 
 # #[tokio::main]
 # async fn main() -> Result<(), Box<dyn std::error::Error>> {
 # let reader = include_bytes!("../car-samples/tiny.car").as_slice();
 let mut total_size = 0;
-let process = |rec: Vec<u8>| rec.len(); // block processing: just extract the size
-let in_mem_limit = 10; /* MiB */
-let db_cache_size = 32; /* MiB */
 
-match Driver::load_car(reader, process, in_mem_limit).await? {
+match DriverBuilder::new()
+    .with_mem_limit_mb(10)
+    .with_block_processor(|rec| rec.len()) // block processing: just extract the raw record size
+    .load_car(reader)
+    .await?
+{
 
     // if all blocks fit within memory
     Driver::Memory(_commit, mut driver) => {
@@ -42,7 +44,7 @@ match Driver::load_car(reader, process, in_mem_limit).await? {
     // if the CAR was too big for in-memory processing
     Driver::Disk(paused) => {
         // set up a disk store we can spill to
-        let store = DiskStore::new("some/path.db".into(), db_cache_size).await?;
+        let store = DiskBuilder::new().open("some/path.db".into()).await?;
         // do the spilling, get back a (similar) driver
         let (_commit, mut driver) = paused.finish_loading(store).await?;
 
@@ -79,7 +81,7 @@ pub mod disk;
 pub mod drive;
 pub mod process;
 
-pub use disk::{DiskError, DiskStore};
-pub use drive::{DriveError, Driver};
+pub use disk::{DiskBuilder, DiskError, DiskStore};
+pub use drive::{DriveError, Driver, DriverBuilder};
 pub use mst::Commit;
 pub use process::Processable;

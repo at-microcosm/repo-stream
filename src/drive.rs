@@ -115,22 +115,92 @@ pub enum Driver<R: AsyncRead + Unpin, T: Processable> {
     Disk(NeedDisk<R, T>),
 }
 
+/// Builder-style driver setup
+pub struct DriverBuilder {
+    pub mem_limit_mb: usize,
+}
+
+impl Default for DriverBuilder {
+    fn default() -> Self {
+        Self { mem_limit_mb: 16 }
+    }
+}
+
+impl DriverBuilder {
+    /// Begin configuring the driver with defaults
+    pub fn new() -> Self {
+        Default::default()
+    }
+    /// Set the in-memory size limit, in MiB
+    ///
+    /// Default: 16 MiB
+    pub fn with_mem_limit_mb(self, new_limit: usize) -> Self {
+        Self {
+            mem_limit_mb: new_limit,
+        }
+    }
+    /// Set the block processor
+    ///
+    /// Default: noop, raw blocks will be emitted
+    pub fn with_block_processor<T: Processable>(
+        self,
+        p: fn(Vec<u8>) -> T,
+    ) -> DriverBuilderWithProcessor<T> {
+        DriverBuilderWithProcessor {
+            mem_limit_mb: self.mem_limit_mb,
+            block_processor: p,
+        }
+    }
+    /// Begin processing an atproto MST from a CAR file
+    pub async fn load_car<R: AsyncRead + Unpin>(
+        self,
+        reader: R,
+    ) -> Result<Driver<R, Vec<u8>>, DriveError> {
+        Driver::load_car(reader, crate::process::noop, self.mem_limit_mb).await
+    }
+}
+
+/// Builder-style driver intermediate step
+///
+/// start from `DriverBuilder`
+pub struct DriverBuilderWithProcessor<T: Processable> {
+    pub mem_limit_mb: usize,
+    pub block_processor: fn(Vec<u8>) -> T,
+}
+
+impl<T: Processable> DriverBuilderWithProcessor<T> {
+    /// Set the in-memory size limit, in MiB
+    ///
+    /// Default: 16 MiB
+    pub fn with_mem_limit_mb(mut self, new_limit: usize) -> Self {
+        self.mem_limit_mb = new_limit;
+        self
+    }
+    /// Begin processing an atproto MST from a CAR file
+    pub async fn load_car<R: AsyncRead + Unpin>(
+        self,
+        reader: R,
+    ) -> Result<Driver<R, T>, DriveError> {
+        Driver::load_car(reader, self.block_processor, self.mem_limit_mb).await
+    }
+}
+
 impl<R: AsyncRead + Unpin, T: Processable> Driver<R, T> {
     /// Begin processing an atproto MST from a CAR file
     ///
     /// Blocks will be loaded, processed, and buffered in memory. If the entire
-    /// processed size is under the `max_size_mb` limit, a `Driver::Memory` will
-    /// be returned along with a `Commit` ready for validation.
+    /// processed size is under the `mem_limit_mb` limit, a `Driver::Memory`
+    /// will be returned along with a `Commit` ready for validation.
     ///
-    /// If the `max_size_mb` limit is reached before loading all blocks, the
+    /// If the `mem_limit_mb` limit is reached before loading all blocks, the
     /// partial state will be returned as `Driver::Disk(needed)`, which can be
     /// resumed by providing a `SqliteStorage` for on-disk block storage.
     pub async fn load_car(
         reader: R,
         process: fn(Vec<u8>) -> T,
-        max_size_mb: usize,
+        mem_limit_mb: usize,
     ) -> Result<Driver<R, T>, DriveError> {
-        let max_size = max_size_mb * 2_usize.pow(20);
+        let max_size = mem_limit_mb * 2_usize.pow(20);
         let mut mem_blocks = HashMap::new();
 
         let mut car = CarReader::new(reader).await?;

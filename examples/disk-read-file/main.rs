@@ -4,7 +4,7 @@ Read a CAR file by spilling to disk
 
 extern crate repo_stream;
 use clap::Parser;
-use repo_stream::{DiskStore, Driver, process::noop};
+use repo_stream::{DiskBuilder, Driver, DriverBuilder};
 use std::path::PathBuf;
 
 #[derive(Debug, Parser)]
@@ -26,25 +26,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let reader = tokio::fs::File::open(car).await?;
     let reader = tokio::io::BufReader::new(reader);
 
-    // configure how much memory can be used before spilling to disk.
-    // real memory usage may differ somewhat.
-    let in_mem_limit = 10; // MiB
-
-    // configure how much memory sqlite is allowed to use when dumping to disk
-    let db_cache_mb = 32; // MiB
-
     log::info!("hello! reading the car...");
 
     // in this example we only bother handling CARs that are too big for memory
     // `noop` helper means: do no block processing, store the raw blocks
-    let driver = match Driver::load_car(reader, noop, in_mem_limit).await? {
+    let driver = match DriverBuilder::new()
+        .with_mem_limit_mb(10) // how much memory can be used before disk spill
+        .load_car(reader)
+        .await?
+    {
         Driver::Memory(_, _) => panic!("try this on a bigger car"),
         Driver::Disk(big_stuff) => {
             // we reach here if the repo was too big and needs to be spilled to
             // disk to continue
 
             // set up a disk store we can spill to
-            let disk_store = DiskStore::new(tmpfile.clone(), db_cache_mb).await?;
+            let disk_store = DiskBuilder::new().open(tmpfile).await?;
 
             // do the spilling, get back a (similar) driver
             let (commit, driver) = big_stuff.finish_loading(disk_store).await?;
