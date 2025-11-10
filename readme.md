@@ -9,10 +9,10 @@ A robust CAR file -> MST walker for atproto
 [docs-badge]: https://docs.rs/repo-stream/badge.svg
 
 
-todo
+more recent todo
 
 - [ ] get an *emtpy* car for the test suite
-- [ ] implement a max size on disk limit
+- [x] implement a max size on disk limit
 
 
 -----
