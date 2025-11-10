@@ -1,6 +1,16 @@
 # repo-stream
 
-Fast and (aspirationally) robust atproto CAR file processing in rust
+Efficient and robust atproto CAR file processing in rust
+
+todo
+
+- [ ] get an *emtpy* car for the test suite
+- [ ] implement a max size on disk limit
+
+
+-----
+
+older stuff (to clean up):
 
 
 current car processing times (records processed into their length usize, phil's dev machine):
@@ -27,7 +37,7 @@ todo
   -> yeah the commit is returned from init
 - [ ] spec compliance todos
   - [x] assert that keys are ordered and fail if not
-  - [ ] verify node mst depth from key (possibly pending [interop test fixes](https://github.com/bluesky-social/atproto-interop-tests/issues/5))
+  - [x] verify node mst depth from key (possibly pending [interop test fixes](https://github.com/bluesky-social/atproto-interop-tests/issues/5))
 - [ ] performance todos
   - [x] consume the serialized nodes into a mutable efficient format
     - [ ] maybe customize the deserialize impl to do that directly?

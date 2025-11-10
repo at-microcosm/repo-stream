@@ -11,6 +11,12 @@ One required function must be implemented, `get_size()`: this should return the
 approximate total off-stack size of the type. (the on-stack size will be added
 automatically via `std::mem::get_size`).
 
+Note that it is **not guaranteed** that the `process` function will run on a
+block before storing it in memory or on disk: it's not possible to know if a
+block is a record without actually walking the MST, so the best we can do is
+apply `process` to any block that we know *cannot* be an MST node, and otherwise
+store the raw block bytes.
+
 Here's a silly processing function that just collects 'eyy's found in the raw
 record bytes
 
