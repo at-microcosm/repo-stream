@@ -116,6 +116,7 @@ pub enum Driver<R: AsyncRead + Unpin, T: Processable> {
 }
 
 /// Builder-style driver setup
+#[derive(Debug, Clone)]
 pub struct DriverBuilder {
     pub mem_limit_mb: usize,
 }
@@ -153,7 +154,7 @@ impl DriverBuilder {
     }
     /// Begin processing an atproto MST from a CAR file
     pub async fn load_car<R: AsyncRead + Unpin>(
-        self,
+        &self,
         reader: R,
     ) -> Result<Driver<R, Vec<u8>>, DriveError> {
         Driver::load_car(reader, crate::process::noop, self.mem_limit_mb).await
@@ -163,6 +164,7 @@ impl DriverBuilder {
 /// Builder-style driver intermediate step
 ///
 /// start from `DriverBuilder`
+#[derive(Debug, Clone)]
 pub struct DriverBuilderWithProcessor<T: Processable> {
     pub mem_limit_mb: usize,
     pub block_processor: fn(Vec<u8>) -> T,
@@ -178,7 +180,7 @@ impl<T: Processable> DriverBuilderWithProcessor<T> {
     }
     /// Begin processing an atproto MST from a CAR file
     pub async fn load_car<R: AsyncRead + Unpin>(
-        self,
+        &self,
         reader: R,
     ) -> Result<Driver<R, T>, DriveError> {
         Driver::load_car(reader, self.block_processor, self.mem_limit_mb).await

@@ -82,6 +82,6 @@ pub mod drive;
 pub mod process;
 
 pub use disk::{DiskBuilder, DiskError, DiskStore};
-pub use drive::{DriveError, Driver, DriverBuilder};
+pub use drive::{DriveError, Driver, DriverBuilder, NeedDisk};
 pub use mst::Commit;
 pub use process::Processable;

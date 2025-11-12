@@ -85,3 +85,18 @@ impl<Item: Sized + Processable> Processable for Vec<Item> {
         direct_size + items_referenced_size
     }
 }
+
+impl<Item: Processable> Processable for Option<Item> {
+    fn get_size(&self) -> usize {
+        self.as_ref().map(|item| item.get_size()).unwrap_or(0)
+    }
+}
+
+impl<Item: Processable, Error: Processable> Processable for Result<Item, Error> {
+    fn get_size(&self) -> usize {
+        match self {
+            Ok(item) => item.get_size(),
+            Err(err) => err.get_size(),
+        }
+    }
+}

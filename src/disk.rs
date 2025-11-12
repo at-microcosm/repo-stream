@@ -53,6 +53,7 @@ impl DiskError {
 }
 
 /// Builder-style disk store setup
+#[derive(Debug, Clone)]
 pub struct DiskBuilder {
     /// Database in-memory cache allowance
     ///
@@ -96,7 +97,7 @@ impl DiskBuilder {
         self
     }
     /// Open and initialize the actual disk storage
-    pub async fn open(self, path: PathBuf) -> Result<DiskStore, DiskError> {
+    pub async fn open(&self, path: PathBuf) -> Result<DiskStore, DiskError> {
         DiskStore::new(path, self.cache_size_mb, self.max_stored_mb).await
     }
 }
