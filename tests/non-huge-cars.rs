@@ -1,11 +1,17 @@
 extern crate repo_stream;
 use repo_stream::Driver;
 
+const EMPTY_CAR: &'static [u8] = include_bytes!("../car-samples/empty.car");
 const TINY_CAR: &'static [u8] = include_bytes!("../car-samples/tiny.car");
 const LITTLE_CAR: &'static [u8] = include_bytes!("../car-samples/little.car");
 const MIDSIZE_CAR: &'static [u8] = include_bytes!("../car-samples/midsize.car");
 
-async fn test_car(bytes: &[u8], expected_records: usize, expected_sum: usize) {
+async fn test_car(
+    bytes: &[u8],
+    expected_records: usize,
+    expected_sum: usize,
+    expect_profile: bool,
+) {
     let mut driver = match Driver::load_car(bytes, |block| block.len(), 10 /* MiB */)
         .await
         .unwrap()
@@ -33,20 +39,25 @@ async fn test_car(bytes: &[u8], expected_records: usize, expected_sum: usize) {
 
     assert_eq!(records, expected_records);
     assert_eq!(sum, expected_sum);
-    assert!(found_bsky_profile);
+    assert_eq!(found_bsky_profile, expect_profile);
+}
+
+#[tokio::test]
+async fn test_empty_car() {
+    test_car(EMPTY_CAR, 0, 0, false).await
 }
 
 #[tokio::test]
 async fn test_tiny_car() {
-    test_car(TINY_CAR, 8, 2071).await
+    test_car(TINY_CAR, 8, 2071, true).await
 }
 
 #[tokio::test]
 async fn test_little_car() {
-    test_car(LITTLE_CAR, 278, 246960).await
+    test_car(LITTLE_CAR, 278, 246960, true).await
 }
 
 #[tokio::test]
 async fn test_midsize_car() {
-    test_car(MIDSIZE_CAR, 11585, 3741393).await
+    test_car(MIDSIZE_CAR, 11585, 3741393, true).await
 }

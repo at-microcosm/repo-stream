@@ -3,6 +3,7 @@ use repo_stream::Driver;
 
 use criterion::{Criterion, criterion_group, criterion_main};
 
+const EMPTY_CAR: &'static [u8] = include_bytes!("../car-samples/empty.car");
 const TINY_CAR: &'static [u8] = include_bytes!("../car-samples/tiny.car");
 const LITTLE_CAR: &'static [u8] = include_bytes!("../car-samples/little.car");
 const MIDSIZE_CAR: &'static [u8] = include_bytes!("../car-samples/midsize.car");
@@ -13,6 +14,9 @@ pub fn criterion_benchmark(c: &mut Criterion) {
         .build()
         .expect("Creating runtime failed");
 
+    c.bench_function("empty-car", |b| {
+        b.to_async(&rt).iter(async || drive_car(EMPTY_CAR).await)
+    });
     c.bench_function("tiny-car", |b| {
         b.to_async(&rt).iter(async || drive_car(TINY_CAR).await)
     });

@@ -87,10 +87,13 @@ impl Depth {
 }
 
 fn push_from_node(stack: &mut Vec<Need>, node: &Node, parent_depth: Depth) -> Result<(), MstError> {
-    // empty nodes are not allowed in the MST
-    // ...except for a single one for empty MST, but we wouldn't be pushing that
+    // empty nodes are not allowed in the MST except in an empty MST
     if node.is_empty() {
-        return Err(MstError::EmptyNode);
+        if parent_depth == Depth::Root {
+            return Ok(()); // empty mst, nothing to push
+        } else {
+            return Err(MstError::EmptyNode);
+        }
     }
 
     let mut entries = Vec::with_capacity(node.entries.len());
