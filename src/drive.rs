@@ -346,7 +346,7 @@ impl<R: AsyncRead + Unpin, T: Processable + Send + 'static> NeedDisk<R, T> {
         })
         .await??;
 
-        let (tx, mut rx) = mpsc::channel::<Vec<(Cid, MaybeProcessedBlock<T>)>>(2);
+        let (tx, mut rx) = mpsc::channel::<Vec<(Cid, MaybeProcessedBlock<T>)>>(1);
 
         let store_worker = tokio::task::spawn_blocking(move || {
             let mut writer = store.get_writer()?;
