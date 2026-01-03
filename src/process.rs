@@ -77,6 +77,12 @@ impl Processable for usize {
     }
 }
 
+impl Processable for String {
+    fn get_size(&self) -> usize {
+        self.capacity()
+    }
+}
+
 impl<Item: Sized + Processable> Processable for Vec<Item> {
     fn get_size(&self) -> usize {
         let slot_size = std::mem::size_of::<Item>();
