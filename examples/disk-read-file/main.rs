@@ -6,6 +6,7 @@ extern crate repo_stream;
 use clap::Parser;
 use repo_stream::{DiskBuilder, Driver, DriverBuilder};
 use std::path::PathBuf;
+use std::time::Instant;
 
 #[derive(Debug, Parser)]
 struct Args {
@@ -27,6 +28,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let reader = tokio::io::BufReader::new(reader);
 
     log::info!("hello! reading the car...");
+    let t0 = Instant::now();
 
     // in this example we only bother handling CARs that are too big for memory
     // `noop` helper means: do no block processing, store the raw blocks
@@ -48,7 +50,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             // at this point you might want to fetch the account's signing key
             // via the DID from the commit, and then verify the signature.
-            log::warn!("big's comit: {:?}", commit);
+            log::warn!("big's comit ({:?}): {:?}", t0.elapsed(), commit);
 
             // pop the driver back out to get some code indentation relief
             driver
@@ -78,7 +80,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    log::info!("arrived! joining rx...");
+    log::info!("arrived! ({:?}) joining rx...", t0.elapsed());
 
     // clean up the database. would be nice to do this in drop so it happens
     // automatically, but some blocking work happens, so that's not allowed in
