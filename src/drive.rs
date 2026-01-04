@@ -343,7 +343,6 @@ impl<R: AsyncRead + Unpin, T: Processable + Send + 'static> NeedDisk<R, T> {
                 .map(|(k, v)| Ok(encode(v).map(|v| (k.to_bytes(), v))?));
 
             writer.put_many(kvs)?;
-            writer.commit()?;
             Ok::<_, DriveError>(store)
         })
         .await??;
@@ -359,8 +358,6 @@ impl<R: AsyncRead + Unpin, T: Processable + Send + 'static> NeedDisk<R, T> {
                     .map(|(k, v)| Ok(encode(v).map(|v| (k.to_bytes(), v))?));
                 writer.put_many(kvs)?;
             }
-
-            writer.commit()?;
             Ok::<_, DriveError>(store)
         }); // await later
 

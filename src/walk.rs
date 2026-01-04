@@ -19,7 +19,7 @@ pub enum WalkError {
     #[error("Action node error: {0}")]
     MstError(#[from] MstError),
     #[error("storage error: {0}")]
-    StorageError(#[from] rusqlite::Error),
+    StorageError(#[from] fjall::Error),
     #[error("Decode error: {0}")]
     DecodeError(#[from] DecodeError),
 }
