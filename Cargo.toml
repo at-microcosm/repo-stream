@@ -8,6 +8,7 @@ repository = "https://tangled.org/@microcosm.blue/repo-stream"
 
 [dependencies]
 bincode = { version = "2.0.1", features = ["serde"] }
+fjall = "3.0.0"
 futures = "0.3.31"
 futures-core = "0.3.31"
 ipld-core = { version = "0.4.2", features = ["serde"] }

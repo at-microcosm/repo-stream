@@ -82,11 +82,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     log::info!("arrived! ({:?}) joining rx...", t0.elapsed());
 
-    // clean up the database. would be nice to do this in drop so it happens
-    // automatically, but some blocking work happens, so that's not allowed in
-    // async rust. 🤷‍♀️
-    join.await?.reset_store().await?;
-
     log::info!("done. n={n} zeros={zeros}");
 
     Ok(())

@@ -18,7 +18,7 @@ let store = DiskBuilder::new()
 */
 
 use crate::drive::DriveError;
-use rusqlite::OptionalExtension;
+use fjall::{Database, Keyspace, KeyspaceCreateOptions, Error as FjallError};
 use std::path::PathBuf;
 
 #[derive(Debug, thiserror::Error)]
@@ -28,7 +28,7 @@ pub enum DiskError {
     /// (The wrapped err should probably be obscured to remove public-facing
     /// sqlite bits)
     #[error(transparent)]
-    DbError(#[from] rusqlite::Error),
+    DbError(#[from] FjallError),
     /// A tokio blocking task failed to join
     #[error("Failed to join a tokio blocking task: {0}")]
     JoinError(#[from] tokio::task::JoinError),
@@ -71,7 +71,7 @@ pub struct DiskBuilder {
 impl Default for DiskBuilder {
     fn default() -> Self {
         Self {
-            cache_size_mb: 32,
+            cache_size_mb: 64,
             max_stored_mb: 10 * 1024, // 10 GiB
         }
     }
@@ -84,7 +84,7 @@ impl DiskBuilder {
     }
     /// Set the in-memory cache allowance for the database
     ///
-    /// Default: 32 MiB
+    /// Default: 64 MiB
     pub fn with_cache_size_mb(mut self, size: usize) -> Self {
         self.cache_size_mb = size;
         self
@@ -104,7 +104,9 @@ impl DiskBuilder {
 
 /// On-disk block storage
 pub struct DiskStore {
-    conn: rusqlite::Connection,
+    #[allow(unused)]
+    db: Database,
+    ks: Keyspace,
     max_stored: usize,
     stored: usize,
 }
@@ -117,69 +119,61 @@ impl DiskStore {
         max_stored_mb: usize,
     ) -> Result<Self, DiskError> {
         let max_stored = max_stored_mb * 2_usize.pow(20);
-        let conn = tokio::task::spawn_blocking(move || {
-            let conn = rusqlite::Connection::open(path)?;
-
-            let sqlite_one_mb = -(2_i64.pow(10)); // negative is kibibytes for sqlite cache_size
-
-            // conn.pragma_update(None, "journal_mode", "OFF")?;
-            // conn.pragma_update(None, "journal_mode", "MEMORY")?;
-            conn.pragma_update(None, "journal_mode", "WAL")?;
-            // conn.pragma_update(None, "wal_autocheckpoint", "0")?; // this lets things get a bit big on disk
-            conn.pragma_update(None, "synchronous", "OFF")?;
-            conn.pragma_update(
-                None,
-                "cache_size",
-                (cache_mb as i64 * sqlite_one_mb).to_string(),
+        let (db, ks) = tokio::task::spawn_blocking(move || {
+            let db = Database::builder(path)
+                // .manual_journal_persist(true)
+                // .worker_threads(1)
+                // .cache_size(cache_mb as u64 * 2_u64.pow(20))
+                // .temporary(true)
+                .open()?;
+            let ks = db.keyspace("z", ||
+                KeyspaceCreateOptions::default()
+                    // .expect_point_read_hits(true)
+                    // .manual_journal_persist(true)
             )?;
-            Self::reset_tables(&conn)?;
 
-            Ok::<_, DiskError>(conn)
+            // Self::reset_tables(&ks)?;
+
+            Ok::<_, DiskError>((db, ks))
         })
         .await??;
 
         Ok(Self {
-            conn,
+            db,
+            ks,
             max_stored,
             stored: 0,
         })
     }
     pub(crate) fn get_writer(&'_ mut self) -> Result<SqliteWriter<'_>, DiskError> {
-        let tx = self.conn.transaction()?;
         Ok(SqliteWriter {
-            tx,
+            ks: self.ks.clone(),
             stored: &mut self.stored,
             max: self.max_stored,
         })
     }
-    pub(crate) fn get_reader<'conn>(&'conn self) -> Result<SqliteReader<'conn>, DiskError> {
-        let select_stmt = self.conn.prepare("SELECT val FROM blocks WHERE key = ?1")?;
-        Ok(SqliteReader { select_stmt })
+    pub(crate) fn get_reader(&self) -> Result<SqliteReader, DiskError> {
+        Ok(SqliteReader {
+            ks: self.ks.clone(),
+        })
     }
     /// Drop and recreate the kv table
     pub async fn reset(self) -> Result<Self, DiskError> {
         tokio::task::spawn_blocking(move || {
-            Self::reset_tables(&self.conn)?;
+            Self::reset_tables(&self.ks)?;
             Ok(self)
         })
         .await?
     }
-    fn reset_tables(conn: &rusqlite::Connection) -> Result<(), DiskError> {
-        conn.execute("DROP TABLE IF EXISTS blocks", ())?;
-        conn.execute(
-            "CREATE TABLE blocks (
-                key  BLOB PRIMARY KEY NOT NULL,
-                val  BLOB NOT NULL
-            ) WITHOUT ROWID",
-            (),
-        )?;
+    fn reset_tables(ks: &Keyspace) -> Result<(), DiskError> {
+        ks.clear()?;
         Ok(())
     }
 }
 
-pub(crate) struct SqliteWriter<'conn> {
-    tx: rusqlite::Transaction<'conn>,
-    stored: &'conn mut usize,
+pub(crate) struct SqliteWriter<'a> {
+    ks: Keyspace,
+    stored: &'a mut usize,
     max: usize,
 }
 
@@ -188,34 +182,28 @@ impl SqliteWriter<'_> {
         &mut self,
         kv: impl Iterator<Item = Result<(Vec<u8>, Vec<u8>), DriveError>>,
     ) -> Result<(), DriveError> {
-        let mut insert_stmt = self
-            .tx
-            .prepare_cached("INSERT INTO blocks (key, val) VALUES (?1, ?2)")
-            .map_err(DiskError::DbError)?;
         for pair in kv {
             let (k, v) = pair?;
             *self.stored += v.len();
             if *self.stored > self.max {
                 return Err(DiskError::MaxSizeExceeded.into());
             }
-            insert_stmt.execute((k, v)).map_err(DiskError::DbError)?;
+            self.ks.insert(k, v).map_err(DiskError::DbError)?;
         }
         Ok(())
     }
-    pub fn commit(self) -> Result<(), DiskError> {
-        self.tx.commit()?;
-        Ok(())
-    }
 }
 
-pub(crate) struct SqliteReader<'conn> {
-    select_stmt: rusqlite::Statement<'conn>,
+pub(crate) struct SqliteReader {
+    ks: Keyspace,
 }
 
-impl SqliteReader<'_> {
-    pub(crate) fn get(&mut self, key: Vec<u8>) -> rusqlite::Result<Option<Vec<u8>>> {
-        self.select_stmt
-            .query_one((&key,), |row| row.get(0))
-            .optional()
+impl SqliteReader {
+    pub(crate) fn get(&mut self, key: Vec<u8>) -> Result<Option<Vec<u8>>, FjallError> {
+        let rv = self
+            .ks
+            .get(&key)?
+            .map(|v| v.as_ref().into());
+        Ok(rv)
     }
 }
