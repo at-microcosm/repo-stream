@@ -18,7 +18,7 @@ let store = DiskBuilder::new()
 */
 
 use crate::drive::DriveError;
-use fjall::{Database, Keyspace, KeyspaceCreateOptions, Error as FjallError};
+use fjall::{Config, Error as FjallError, Keyspace, Partition, PartitionCreateOptions};
 use std::path::PathBuf;
 
 #[derive(Debug, thiserror::Error)]
@@ -38,18 +38,6 @@ pub enum DiskError {
     /// limit.
     #[error("Maximum disk size reached")]
     MaxSizeExceeded,
-    #[error("this error was replaced, seeing this is a bug.")]
-    #[doc(hidden)]
-    Stolen,
-}
-
-impl DiskError {
-    /// hack for ownership challenges with the disk driver
-    pub(crate) fn steal(&mut self) -> Self {
-        let mut swapped = DiskError::Stolen;
-        std::mem::swap(self, &mut swapped);
-        swapped
-    }
 }
 
 /// Builder-style disk store setup
@@ -105,8 +93,8 @@ impl DiskBuilder {
 /// On-disk block storage
 pub struct DiskStore {
     #[allow(unused)]
-    db: Database,
-    ks: Keyspace,
+    db: Keyspace,
+    partition: Partition,
     max_stored: usize,
     stored: usize,
 }
@@ -119,91 +107,66 @@ impl DiskStore {
         max_stored_mb: usize,
     ) -> Result<Self, DiskError> {
         let max_stored = max_stored_mb * 2_usize.pow(20);
-        let (db, ks) = tokio::task::spawn_blocking(move || {
-            let db = Database::builder(path)
+        let (db, partition) = tokio::task::spawn_blocking(move || {
+            let db = Config::new(path)
                 // .manual_journal_persist(true)
-                // .worker_threads(1)
-                // .cache_size(cache_mb as u64 * 2_u64.pow(20))
-                // .temporary(true)
+                // .flush_workers(1)
+                // .compaction_workers(1)
+                .cache_size(cache_mb as u64 * 2_u64.pow(20))
+                .temporary(true)
                 .open()?;
-            let ks = db.keyspace("z", ||
-                KeyspaceCreateOptions::default()
-                    // .expect_point_read_hits(true)
-                    // .manual_journal_persist(true)
-            )?;
+            let partition = Self::get_partition(&db)?;
 
-            // Self::reset_tables(&ks)?;
-
-            Ok::<_, DiskError>((db, ks))
+            Ok::<_, DiskError>((db, partition))
         })
         .await??;
 
         Ok(Self {
             db,
-            ks,
+            partition,
             max_stored,
             stored: 0,
         })
     }
-    pub(crate) fn get_writer(&'_ mut self) -> Result<SqliteWriter<'_>, DiskError> {
-        Ok(SqliteWriter {
-            ks: self.ks.clone(),
-            stored: &mut self.stored,
-            max: self.max_stored,
-        })
-    }
-    pub(crate) fn get_reader(&self) -> Result<SqliteReader, DiskError> {
-        Ok(SqliteReader {
-            ks: self.ks.clone(),
-        })
-    }
+
     /// Drop and recreate the kv table
-    pub async fn reset(self) -> Result<Self, DiskError> {
+    pub async fn reset(mut self) -> Result<Self, DiskError> {
         tokio::task::spawn_blocking(move || {
-            Self::reset_tables(&self.ks)?;
+            let partition = self.partition;
+            Self::reset_partition(&self.db, partition)?;
+            self.partition = Self::get_partition(&self.db)?;
             Ok(self)
         })
         .await?
     }
-    fn reset_tables(ks: &Keyspace) -> Result<(), DiskError> {
-        ks.clear()?;
-        Ok(())
+
+    fn get_partition(db: &Keyspace) -> Result<Partition, FjallError> {
+        db.open_partition("z", PartitionCreateOptions::default())
     }
-}
-
-pub(crate) struct SqliteWriter<'a> {
-    ks: Keyspace,
-    stored: &'a mut usize,
-    max: usize,
-}
-
-impl SqliteWriter<'_> {
+    fn reset_partition(keyspace: &Keyspace, partition: Partition) -> Result<Partition, DiskError> {
+        keyspace.delete_partition(partition)?;
+        let partition = Self::get_partition(keyspace)?;
+        Ok(partition)
+    }
     pub(crate) fn put_many(
         &mut self,
         kv: impl Iterator<Item = Result<(Vec<u8>, Vec<u8>), DriveError>>,
     ) -> Result<(), DriveError> {
+        let mut batch = self.db.batch();
         for pair in kv {
             let (k, v) = pair?;
-            *self.stored += v.len();
-            if *self.stored > self.max {
+            self.stored += v.len();
+            if self.stored > self.max_stored {
                 return Err(DiskError::MaxSizeExceeded.into());
             }
-            self.ks.insert(k, v).map_err(DiskError::DbError)?;
+            batch.insert(&self.partition, k, v);
         }
+        batch.commit().map_err(DiskError::DbError)?;
         Ok(())
     }
-}
 
-pub(crate) struct SqliteReader {
-    ks: Keyspace,
-}
-
-impl SqliteReader {
-    pub(crate) fn get(&mut self, key: Vec<u8>) -> Result<Option<Vec<u8>>, FjallError> {
-        let rv = self
-            .ks
-            .get(&key)?
-            .map(|v| v.as_ref().into());
-        Ok(rv)
+    #[inline]
+    pub(crate) fn get(&mut self, key: &[u8]) -> Result<Option<fjall::Slice>, FjallError> {
+        self.partition.get(key)
     }
 }

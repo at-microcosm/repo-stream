@@ -1,6 +1,6 @@
 //! Depth-first MST traversal
 
-use crate::disk::SqliteReader;
+use crate::disk::DiskStore;
 use crate::drive::{DecodeError, MaybeProcessedBlock};
 use crate::mst::Node;
 use crate::process::Processable;
@@ -239,7 +239,7 @@ impl Walker {
     /// blocking!!!!!!
     pub fn disk_step<T: Processable>(
         &mut self,
-        reader: &mut SqliteReader,
+        reader: &mut DiskStore,
         process: impl Fn(Vec<u8>) -> T,
     ) -> Result<Step<T>, WalkError> {
         loop {
@@ -252,7 +252,7 @@ impl Walker {
                 &mut Need::Node { depth, cid } => {
                     let cid_bytes = cid.to_bytes();
                     log::trace!("need node {cid:?}");
-                    let Some(block_bytes) = reader.get(cid_bytes)? else {
+                    let Some(block_bytes) = reader.get(&cid_bytes)? else {
                         log::trace!("node not found, resting");
                         return Ok(Step::Missing(cid));
                     };
@@ -274,7 +274,7 @@ impl Walker {
                 Need::Record { rkey, cid } => {
                     log::trace!("need record {cid:?}");
                     let cid_bytes = cid.to_bytes();
-                    let Some(data_bytes) = reader.get(cid_bytes)? else {
+                    let Some(data_bytes) = reader.get(&cid_bytes)? else {
                         log::trace!("record block not found, resting");
                         return Ok(Step::Missing(*cid));
                     };
