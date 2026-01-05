@@ -18,7 +18,7 @@ let store = DiskBuilder::new()
 */
 
 use crate::drive::DriveError;
-use fjall::{Config, Error as FjallError, Keyspace, Partition, PartitionCreateOptions};
+use fjall::{Database, Error as FjallError, Keyspace, KeyspaceCreateOptions};
 use std::path::PathBuf;
 
 #[derive(Debug, thiserror::Error)]
@@ -93,8 +93,8 @@ impl DiskBuilder {
 /// On-disk block storage
 pub struct DiskStore {
     #[allow(unused)]
-    db: Keyspace,
-    partition: Partition,
+    db: Database,
+    partition: Keyspace,
     max_stored: usize,
     stored: usize,
 }
@@ -108,14 +108,14 @@ impl DiskStore {
     ) -> Result<Self, DiskError> {
         let max_stored = max_stored_mb * 2_usize.pow(20);
         let (db, partition) = tokio::task::spawn_blocking(move || {
-            let db = Config::new(path)
+            let db = Database::builder(path)
                 // .manual_journal_persist(true)
                 // .flush_workers(1)
                 // .compaction_workers(1)
                 .cache_size(cache_mb as u64 * 2_u64.pow(20))
                 .temporary(true)
                 .open()?;
-            let partition = Self::get_partition(&db)?;
+            let partition = db.keyspace("z", KeyspaceCreateOptions::default)?;
 
             Ok::<_, DiskError>((db, partition))
         })
@@ -129,25 +129,6 @@ impl DiskStore {
         })
     }
 
-    /// Drop and recreate the kv table
-    pub async fn reset(mut self) -> Result<Self, DiskError> {
-        tokio::task::spawn_blocking(move || {
-            let partition = self.partition;
-            Self::reset_partition(&self.db, partition)?;
-            self.partition = Self::get_partition(&self.db)?;
-            Ok(self)
-        })
-        .await?
-    }
-
-    fn get_partition(db: &Keyspace) -> Result<Partition, FjallError> {
-        db.open_partition("z", PartitionCreateOptions::default())
-    }
-    fn reset_partition(keyspace: &Keyspace, partition: Partition) -> Result<Partition, DiskError> {
-        keyspace.delete_partition(partition)?;
-        let partition = Self::get_partition(keyspace)?;
-        Ok(partition)
-    }
     pub(crate) fn put_many(
         &mut self,
         kv: impl Iterator<Item = Result<(Vec<u8>, Vec<u8>), DriveError>>,

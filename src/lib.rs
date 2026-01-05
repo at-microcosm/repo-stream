@@ -53,9 +53,6 @@ match DriverBuilder::new()
                 total_size += size;
             }
         }
-
-        // clean up the disk store (drop tables etc)
-        driver.reset_store().await?;
     }
 };
 println!("sum of size of all records: {total_size}");

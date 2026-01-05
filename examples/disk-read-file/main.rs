@@ -82,9 +82,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     log::info!("arrived! ({:?}) joining rx...", t0.elapsed());
 
-    let driver = join.await?;
-
-    driver.reset_store().await?;
+    join.await?;
 
     log::info!("done. n={n} zeros={zeros}");
 

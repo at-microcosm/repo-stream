@@ -446,7 +446,6 @@ impl<T: Processable + Send + 'static> DiskDriver<T> {
     ///         println!("{rkey}: size={}", record.len());
     ///     }
     /// }
-    /// let store = disk_driver.reset_store().await?;
     /// # Ok(())
     /// # }
     /// ```
@@ -559,7 +558,6 @@ impl<T: Processable + Send + 'static> DiskDriver<T> {
     ///     }
     ///
     /// }
-    /// let store = join.await?.reset_store().await?;
     /// # Ok(())
     /// # }
     /// ```
@@ -581,18 +579,5 @@ impl<T: Processable + Send + 'static> DiskDriver<T> {
         });
 
         (rx, chan_task)
-    }
-
-    /// Reset the disk storage so it can be reused. You must call this.
-    ///
-    /// Ideally we'd put this in an `impl Drop`, but since it makes blocking
-    /// calls, that would be risky in an async context. For now you just have to
-    /// carefully make sure you call it.
-    ///
-    /// The sqlite store is returned, so it can be reused for another
-    /// `DiskDriver`.
-    pub async fn reset_store(mut self) -> Result<DiskStore, DriveError> {
-        let BigState { store, .. } = self.state.take().expect("valid state");
-        Ok(store.reset().await?)
     }
 }
