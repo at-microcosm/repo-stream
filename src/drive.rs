@@ -335,14 +335,12 @@ impl<R: AsyncRead + Unpin, T: Processable + Send + 'static> NeedDisk<R, T> {
         // move store in and back out so we can manage lifetimes
         // dump mem blocks into the store
         store = tokio::task::spawn(async move {
-            let mut writer = store.get_writer()?;
-
             let kvs = self
                 .mem_blocks
                 .into_iter()
                 .map(|(k, v)| Ok(encode(v).map(|v| (k.to_bytes(), v))?));
 
-            writer.put_many(kvs)?;
+            store.put_many(kvs)?;
             Ok::<_, DriveError>(store)
         })
         .await??;
@@ -350,13 +348,11 @@ impl<R: AsyncRead + Unpin, T: Processable + Send + 'static> NeedDisk<R, T> {
         let (tx, mut rx) = mpsc::channel::<Vec<(Cid, MaybeProcessedBlock<T>)>>(1);
 
         let store_worker = tokio::task::spawn_blocking(move || {
-            let mut writer = store.get_writer()?;
-
             while let Some(chunk) = rx.blocking_recv() {
                 let kvs = chunk
                     .into_iter()
                     .map(|(k, v)| Ok(encode(v).map(|v| (k.to_bytes(), v))?));
-                writer.put_many(kvs)?;
+                store.put_many(kvs)?;
             }
             Ok::<_, DriveError>(store)
         }); // await later
@@ -465,46 +461,24 @@ impl<T: Processable + Send + 'static> DiskDriver<T> {
         // comes out again.
         let (state, res) = tokio::task::spawn_blocking(
             move || -> (BigState, Result<BlockChunk<T>, DriveError>) {
-                let mut reader_res = state.store.get_reader();
-                let reader: &mut _ = match reader_res {
-                    Ok(ref mut r) => r,
-                    Err(ref mut e) => {
-                        // unfortunately we can't return the error directly because
-                        // (for some reason) it's attached to the lifetime of the
-                        // reader?
-                        // hack a mem::swap so we can get it out :/
-                        let e_swapped = e.steal();
-                        // the pain: `state` *has to* outlive the reader
-                        drop(reader_res);
-                        return (state, Err(e_swapped.into()));
-                    }
-                };
-
                 let mut out = Vec::with_capacity(n);
 
                 for _ in 0..n {
                     // walk as far as we can until we run out of blocks or find a record
-                    let step = match state.walker.disk_step(reader, process) {
+                    let step = match state.walker.disk_step(&mut state.store, process) {
                         Ok(s) => s,
                         Err(e) => {
-                            // the pain: `state` *has to* outlive the reader
-                            drop(reader_res);
                             return (state, Err(e.into()));
                         }
                     };
                     match step {
                         Step::Missing(cid) => {
-                            // the pain: `state` *has to* outlive the reader
-                            drop(reader_res);
                             return (state, Err(DriveError::MissingBlock(cid)));
                         }
                         Step::Finish => break,
                         Step::Found { rkey, data } => out.push((rkey, data)),
                     };
                 }
-
-                // `state` *has to* outlive the reader
-                drop(reader_res);
 
                 (state, Ok::<_, DriveError>(out))
             },
@@ -529,10 +503,6 @@ impl<T: Processable + Send + 'static> DiskDriver<T> {
         tx: mpsc::Sender<Result<BlockChunk<T>, DriveError>>,
     ) -> Result<(), mpsc::error::SendError<Result<BlockChunk<T>, DriveError>>> {
         let BigState { store, walker } = self.state.as_mut().expect("valid state");
-        let mut reader = match store.get_reader() {
-            Ok(r) => r,
-            Err(e) => return tx.blocking_send(Err(e.into())),
-        };
 
         loop {
             let mut out: BlockChunk<T> = Vec::with_capacity(n);
@@ -540,7 +510,7 @@ impl<T: Processable + Send + 'static> DiskDriver<T> {
             for _ in 0..n {
                 // walk as far as we can until we run out of blocks or find a record
 
-                let step = match walker.disk_step(&mut reader, self.process) {
+                let step = match walker.disk_step(store, self.process) {
                     Ok(s) => s,
                     Err(e) => return tx.blocking_send(Err(e.into())),
                 };

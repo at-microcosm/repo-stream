@@ -33,7 +33,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // in this example we only bother handling CARs that are too big for memory
     // `noop` helper means: do no block processing, store the raw blocks
     let driver = match DriverBuilder::new()
-        .with_mem_limit_mb(10) // how much memory can be used before disk spill
+        .with_mem_limit_mb(32) // how much memory can be used before disk spill
         .load_car(reader)
         .await?
     {
@@ -81,6 +81,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     log::info!("arrived! ({:?}) joining rx...", t0.elapsed());
+
+    let driver = join.await?;
+
+    driver.reset_store().await?;
 
     log::info!("done. n={n} zeros={zeros}");
 
