@@ -18,7 +18,8 @@ let store = DiskBuilder::new()
 */
 
 use crate::drive::DriveError;
-use fjall::{Database, Error as FjallError, Keyspace, KeyspaceCreateOptions};
+use fjall::config::{CompressionPolicy, PinningPolicy, RestartIntervalPolicy};
+use fjall::{CompressionType, Database, Error as FjallError, Keyspace, KeyspaceCreateOptions};
 use std::path::PathBuf;
 
 #[derive(Debug, thiserror::Error)]
@@ -112,10 +113,18 @@ impl DiskStore {
                 // .manual_journal_persist(true)
                 // .flush_workers(1)
                 // .compaction_workers(1)
+                .journal_compression(CompressionType::None)
                 .cache_size(cache_mb as u64 * 2_u64.pow(20))
                 .temporary(true)
                 .open()?;
-            let partition = db.keyspace("z", KeyspaceCreateOptions::default)?;
+            let opts = KeyspaceCreateOptions::default()
+                .data_block_restart_interval_policy(RestartIntervalPolicy::all(8))
+                .filter_block_pinning_policy(PinningPolicy::disabled())
+                .expect_point_read_hits(true)
+                .data_block_compression_policy(CompressionPolicy::disabled())
+                .manual_journal_persist(true)
+                .max_memtable_size(32 * 2_u64.pow(20));
+            let partition = db.keyspace("z", || opts)?;
 
             Ok::<_, DiskError>((db, partition))
         })
