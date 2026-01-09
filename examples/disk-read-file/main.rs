@@ -3,6 +3,12 @@ Read a CAR file by spilling to disk
 */
 
 extern crate repo_stream;
+
+use mimalloc::MiMalloc;
+
+#[global_allocator]
+static GLOBAL: MiMalloc = MiMalloc;
+
 use clap::Parser;
 use repo_stream::{DiskBuilder, Driver, DriverBuilder};
 use std::path::PathBuf;
