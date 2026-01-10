@@ -18,6 +18,7 @@ let store = DiskBuilder::new()
 */
 
 use crate::drive::DriveError;
+use bytes::Bytes;
 use fjall::config::{CompressionPolicy, PinningPolicy, RestartIntervalPolicy};
 use fjall::{CompressionType, Database, Error as FjallError, Keyspace, KeyspaceCreateOptions};
 use std::path::PathBuf;
@@ -140,11 +141,10 @@ impl DiskStore {
 
     pub(crate) fn put_many(
         &mut self,
-        kv: impl Iterator<Item = Result<(Vec<u8>, Vec<u8>), DriveError>>,
+        kv: impl Iterator<Item = (Vec<u8>, Bytes)>,
     ) -> Result<(), DriveError> {
         let mut batch = self.db.batch();
-        for pair in kv {
-            let (k, v) = pair?;
+        for (k, v) in kv {
             self.stored += v.len();
             if self.stored > self.max_stored {
                 return Err(DiskError::MaxSizeExceeded.into());

@@ -12,9 +12,13 @@ async fn test_car(
     expected_sum: usize,
     expect_profile: bool,
 ) {
-    let mut driver = match Driver::load_car(bytes, |block| block.len(), 10 /* MiB */)
-        .await
-        .unwrap()
+    let mut driver = match Driver::load_car(
+        bytes,
+        |block| block.len().to_ne_bytes().to_vec().into(),
+        10, /* MiB */
+    )
+    .await
+    .unwrap()
     {
         Driver::Memory(_commit, mem_driver) => mem_driver,
         Driver::Disk(_) => panic!("too big"),
@@ -26,8 +30,12 @@ async fn test_car(
     let mut prev_rkey = "".to_string();
 
     while let Some(pairs) = driver.next_chunk(256).await.unwrap() {
-        for (rkey, size) in pairs {
+        for (rkey, bytes) in pairs {
             records += 1;
+
+            let (int_bytes, _) = bytes.split_at(size_of::<usize>());
+            let size = usize::from_ne_bytes(int_bytes.try_into().unwrap());
+
             sum += size;
             if rkey == "app.bsky.actor.profile/self" {
                 found_bsky_profile = true;
