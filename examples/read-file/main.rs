@@ -24,7 +24,7 @@ async fn main() -> Result<()> {
     let reader = tokio::io::BufReader::new(reader);
 
     let (commit, mut driver) = match DriverBuilder::new()
-        .with_block_processor(|block| block.len())
+        .with_block_processor(|block| block.len().to_ne_bytes().to_vec().into())
         .load_car(reader)
         .await?
     {

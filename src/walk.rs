@@ -1,12 +1,12 @@
 //! Depth-first MST traversal
 
+use crate::HashMap;
 use crate::disk::DiskStore;
-use crate::drive::{DecodeError, MaybeProcessedBlock};
+use crate::drive::MaybeProcessedBlock;
 use crate::mst::Node;
-use crate::process::Processable;
-use ipld_core::cid::Cid;
+use bytes::Bytes;
+use cid::Cid;
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
 use std::convert::Infallible;
 
 /// Errors that can happen while walking
@@ -20,8 +20,6 @@ pub enum WalkError {
     MstError(#[from] MstError),
     #[error("storage error: {0}")]
     StorageError(#[from] fjall::Error),
-    #[error("Decode error: {0}")]
-    DecodeError(#[from] DecodeError),
 }
 
 /// Errors from invalid Rkeys
@@ -45,13 +43,13 @@ pub enum MstError {
 
 /// Walker outputs
 #[derive(Debug)]
-pub enum Step<T> {
+pub enum Step {
     /// We needed this CID but it's not in the block store
     Missing(Cid),
     /// Reached the end of the MST! yay!
     Finish,
     /// A record was found!
-    Found { rkey: String, data: T },
+    Found { rkey: String, data: Bytes },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -176,11 +174,11 @@ impl Walker {
     }
 
     /// Advance through nodes until we find a record or can't go further
-    pub fn step<T: Processable>(
+    pub fn step(
         &mut self,
-        blocks: &mut HashMap<Cid, MaybeProcessedBlock<T>>,
-        process: impl Fn(Vec<u8>) -> T,
-    ) -> Result<Step<T>, WalkError> {
+        blocks: &mut HashMap<Cid, MaybeProcessedBlock>,
+        process: impl Fn(Bytes) -> Bytes,
+    ) -> Result<Step, WalkError> {
         loop {
             let Some(need) = self.stack.last_mut() else {
                 log::trace!("tried to walk but we're actually done.");
@@ -216,7 +214,7 @@ impl Walker {
                     };
                     let rkey = rkey.clone();
                     let data = match data {
-                        MaybeProcessedBlock::Raw(data) => process(data.to_vec()),
+                        MaybeProcessedBlock::Raw(data) => process(data.clone()),
                         MaybeProcessedBlock::Processed(t) => t.clone(),
                     };
 
@@ -237,11 +235,11 @@ impl Walker {
     }
 
     /// blocking!!!!!!
-    pub fn disk_step<T: Processable>(
+    pub fn disk_step(
         &mut self,
         reader: &mut DiskStore,
-        process: impl Fn(Vec<u8>) -> T,
-    ) -> Result<Step<T>, WalkError> {
+        process: impl Fn(Bytes) -> Bytes,
+    ) -> Result<Step, WalkError> {
         loop {
             let Some(need) = self.stack.last_mut() else {
                 log::trace!("tried to walk but we're actually done.");
@@ -252,12 +250,12 @@ impl Walker {
                 &mut Need::Node { depth, cid } => {
                     let cid_bytes = cid.to_bytes();
                     log::trace!("need node {cid:?}");
-                    let Some(block_bytes) = reader.get(&cid_bytes)? else {
+                    let Some(block_slice) = reader.get(&cid_bytes)? else {
                         log::trace!("node not found, resting");
                         return Ok(Step::Missing(cid));
                     };
 
-                    let block: MaybeProcessedBlock<T> = crate::drive::decode(&block_bytes)?;
+                    let block = MaybeProcessedBlock::from_bytes(block_slice.into()); // TODO shouldn't fjalls slice already be bytes
 
                     let MaybeProcessedBlock::Raw(data) = block else {
                         return Err(WalkError::BadCommitFingerprint);
@@ -274,11 +272,11 @@ impl Walker {
                 Need::Record { rkey, cid } => {
                     log::trace!("need record {cid:?}");
                     let cid_bytes = cid.to_bytes();
-                    let Some(data_bytes) = reader.get(&cid_bytes)? else {
+                    let Some(data_slice) = reader.get(&cid_bytes)? else {
                         log::trace!("record block not found, resting");
                         return Ok(Step::Missing(*cid));
                     };
-                    let data: MaybeProcessedBlock<T> = crate::drive::decode(&data_bytes)?;
+                    let data = MaybeProcessedBlock::from_bytes(data_slice.into());
                     let rkey = rkey.clone();
                     let data = match data {
                         MaybeProcessedBlock::Raw(data) => process(data),

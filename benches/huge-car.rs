@@ -22,9 +22,13 @@ async fn drive_car(filename: impl AsRef<Path>) -> usize {
     let reader = tokio::fs::File::open(filename).await.unwrap();
     let reader = tokio::io::BufReader::new(reader);
 
-    let mut driver = match Driver::load_car(reader, |block| block.len(), 1024)
-        .await
-        .unwrap()
+    let mut driver = match Driver::load_car(
+        reader,
+        |block| block.len().to_le_bytes().to_vec().into(),
+        1024,
+    )
+    .await
+    .unwrap()
     {
         Driver::Memory(_, mem_driver) => mem_driver,
         Driver::Disk(_) => panic!("not doing disk for benchmark"),

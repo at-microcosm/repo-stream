@@ -1,15 +1,15 @@
 //! Consume a CAR from an AsyncRead, producing an ordered stream of records
 
+use crate::HashMap;
 use crate::disk::{DiskError, DiskStore};
-use crate::process::Processable;
-use ipld_core::cid::Cid;
+use crate::mst::Node;
+use bytes::Bytes;
+use cid::Cid;
 use iroh_car::CarReader;
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::convert::Infallible;
 use tokio::{io::AsyncRead, sync::mpsc};
 
-use crate::mst::{Commit, Node};
+use crate::mst::Commit;
 use crate::walk::{Step, WalkError, Walker};
 
 /// Errors that can happen while consuming and emitting blocks and records
@@ -29,33 +29,23 @@ pub enum DriveError {
     MissingRoot,
     #[error("Storage error")]
     StorageError(#[from] DiskError),
-    #[error("Encode error: {0}")]
-    BincodeEncodeError(#[from] bincode::error::EncodeError),
     #[error("Tried to send on a closed channel")]
     ChannelSendError, // SendError takes <T> which we don't need
     #[error("Failed to join a task: {0}")]
     JoinError(#[from] tokio::task::JoinError),
 }
 
-#[derive(Debug, thiserror::Error)]
-pub enum DecodeError {
-    #[error(transparent)]
-    BincodeDecodeError(#[from] bincode::error::DecodeError),
-    #[error("extra bytes remained after decoding")]
-    ExtraGarbage,
-}
-
 /// An in-order chunk of Rkey + (processed) Block pairs
-pub type BlockChunk<T> = Vec<(String, T)>;
+pub type BlockChunk = Vec<(String, Bytes)>;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) enum MaybeProcessedBlock<T> {
+#[derive(Debug, Clone)]
+pub(crate) enum MaybeProcessedBlock {
     /// A block that's *probably* a Node (but we can't know yet)
     ///
     /// It *can be* a record that suspiciously looks a lot like a node, so we
     /// cannot eagerly turn it into a Node. We only know for sure what it is
     /// when we actually walk down the MST
-    Raw(Vec<u8>),
+    Raw(Bytes),
     /// A processed record from a block that was definitely not a Node
     ///
     /// Processing has to be fallible because the CAR can have totally-unused
@@ -71,48 +61,60 @@ pub(crate) enum MaybeProcessedBlock<T> {
     /// There's an alternative here, which would be to kick unprocessable blocks
     /// back to Raw, or maybe even a new RawUnprocessable variant. Then we could
     /// surface the typed error later if needed by trying to reprocess.
-    Processed(T),
+    Processed(Bytes),
 }
 
-impl<T: Processable> Processable for MaybeProcessedBlock<T> {
-    /// TODO this is probably a little broken
-    fn get_size(&self) -> usize {
-        use std::{cmp::max, mem::size_of};
-
-        // enum is always as big as its biggest member?
-        let base_size = max(size_of::<Vec<u8>>(), size_of::<T>());
-
-        let extra = match self {
-            Self::Raw(bytes) => bytes.len(),
-            Self::Processed(t) => t.get_size(),
-        };
-
-        base_size + extra
-    }
-}
-
-impl<T> MaybeProcessedBlock<T> {
-    fn maybe(process: fn(Vec<u8>) -> T, data: Vec<u8>) -> Self {
+impl MaybeProcessedBlock {
+    pub(crate) fn maybe(process: fn(Bytes) -> Bytes, data: Bytes) -> Self {
         if Node::could_be(&data) {
             MaybeProcessedBlock::Raw(data)
         } else {
             MaybeProcessedBlock::Processed(process(data))
         }
     }
+    pub(crate) fn len(&self) -> usize {
+        match self {
+            MaybeProcessedBlock::Raw(b) => b.len(),
+            MaybeProcessedBlock::Processed(b) => b.len(),
+        }
+    }
+    pub(crate) fn into_bytes(self) -> Bytes {
+        match self {
+            MaybeProcessedBlock::Raw(b) => {
+                let mut owned = b.try_into_mut().unwrap();
+                owned.extend_from_slice(&[0x00]);
+                owned.into()
+            }
+            MaybeProcessedBlock::Processed(b) => {
+                let mut owned = b.try_into_mut().unwrap();
+                owned.extend_from_slice(&[0x01]);
+                owned.into()
+            }
+        }
+    }
+    pub(crate) fn from_bytes(mut b: Bytes) -> Self {
+        // TODO: make sure bytes is not empty, that it's explicitly 0 or 1, etc
+        let suffix = b.split_off(b.len() - 1);
+        if *suffix == [0x00] {
+            MaybeProcessedBlock::Raw(b)
+        } else {
+            MaybeProcessedBlock::Processed(b)
+        }
+    }
 }
 
 /// Read a CAR file, buffering blocks in memory or to disk
-pub enum Driver<R: AsyncRead + Unpin, T: Processable> {
+pub enum Driver<R: AsyncRead + Unpin> {
     /// All blocks fit within the memory limit
     ///
     /// You probably want to check the commit's signature. You can go ahead and
     /// walk the MST right away.
-    Memory(Commit, MemDriver<T>),
+    Memory(Commit, MemDriver),
     /// Blocks exceed the memory limit
     ///
     /// You'll need to provide a disk storage to continue. The commit will be
     /// returned and can be validated only once all blocks are loaded.
-    Disk(NeedDisk<R, T>),
+    Disk(NeedDisk<R>),
 }
 
 /// Builder-style driver setup
@@ -125,6 +127,12 @@ impl Default for DriverBuilder {
     fn default() -> Self {
         Self { mem_limit_mb: 16 }
     }
+}
+
+/// Processor that just returns the raw blocks
+#[inline]
+pub fn noop(block: Bytes) -> Bytes {
+    block
 }
 
 impl DriverBuilder {
@@ -143,21 +151,18 @@ impl DriverBuilder {
     /// Set the block processor
     ///
     /// Default: noop, raw blocks will be emitted
-    pub fn with_block_processor<T: Processable>(
+    pub fn with_block_processor(
         self,
-        p: fn(Vec<u8>) -> T,
-    ) -> DriverBuilderWithProcessor<T> {
+        block_processor: fn(Bytes) -> Bytes,
+    ) -> DriverBuilderWithProcessor {
         DriverBuilderWithProcessor {
             mem_limit_mb: self.mem_limit_mb,
-            block_processor: p,
+            block_processor,
         }
     }
     /// Begin processing an atproto MST from a CAR file
-    pub async fn load_car<R: AsyncRead + Unpin>(
-        &self,
-        reader: R,
-    ) -> Result<Driver<R, Vec<u8>>, DriveError> {
-        Driver::load_car(reader, crate::process::noop, self.mem_limit_mb).await
+    pub async fn load_car<R: AsyncRead + Unpin>(&self, reader: R) -> Result<Driver<R>, DriveError> {
+        Driver::load_car(reader, noop, self.mem_limit_mb).await
     }
 }
 
@@ -165,12 +170,12 @@ impl DriverBuilder {
 ///
 /// start from `DriverBuilder`
 #[derive(Debug, Clone)]
-pub struct DriverBuilderWithProcessor<T: Processable> {
+pub struct DriverBuilderWithProcessor {
     pub mem_limit_mb: usize,
-    pub block_processor: fn(Vec<u8>) -> T,
+    pub block_processor: fn(Bytes) -> Bytes,
 }
 
-impl<T: Processable> DriverBuilderWithProcessor<T> {
+impl DriverBuilderWithProcessor {
     /// Set the in-memory size limit, in MiB
     ///
     /// Default: 16 MiB
@@ -179,15 +184,12 @@ impl<T: Processable> DriverBuilderWithProcessor<T> {
         self
     }
     /// Begin processing an atproto MST from a CAR file
-    pub async fn load_car<R: AsyncRead + Unpin>(
-        &self,
-        reader: R,
-    ) -> Result<Driver<R, T>, DriveError> {
+    pub async fn load_car<R: AsyncRead + Unpin>(&self, reader: R) -> Result<Driver<R>, DriveError> {
         Driver::load_car(reader, self.block_processor, self.mem_limit_mb).await
     }
 }
 
-impl<R: AsyncRead + Unpin, T: Processable> Driver<R, T> {
+impl<R: AsyncRead + Unpin> Driver<R> {
     /// Begin processing an atproto MST from a CAR file
     ///
     /// Blocks will be loaded, processed, and buffered in memory. If the entire
@@ -199,9 +201,9 @@ impl<R: AsyncRead + Unpin, T: Processable> Driver<R, T> {
     /// resumed by providing a `SqliteStorage` for on-disk block storage.
     pub async fn load_car(
         reader: R,
-        process: fn(Vec<u8>) -> T,
+        process: fn(Bytes) -> Bytes,
         mem_limit_mb: usize,
-    ) -> Result<Driver<R, T>, DriveError> {
+    ) -> Result<Driver<R>, DriveError> {
         let max_size = mem_limit_mb * 2_usize.pow(20);
         let mut mem_blocks = HashMap::new();
 
@@ -227,11 +229,13 @@ impl<R: AsyncRead + Unpin, T: Processable> Driver<R, T> {
                 continue;
             }
 
+            let data = Bytes::from(data);
+
             // remaining possible types: node, record, other. optimistically process
             let maybe_processed = MaybeProcessedBlock::maybe(process, data);
 
             // stash (maybe processed) blocks in memory as long as we have room
-            mem_size += std::mem::size_of::<Cid>() + maybe_processed.get_size();
+            mem_size += maybe_processed.len();
             mem_blocks.insert(cid, maybe_processed);
             if mem_size >= max_size {
                 return Ok(Driver::Disk(NeedDisk {
@@ -275,15 +279,15 @@ impl<R: AsyncRead + Unpin, T: Processable> Driver<R, T> {
 /// work the init function will do. We can drop the CAR reader before walking,
 /// so the sync/async boundaries become a little easier to work around.
 #[derive(Debug)]
-pub struct MemDriver<T: Processable> {
-    blocks: HashMap<Cid, MaybeProcessedBlock<T>>,
+pub struct MemDriver {
+    blocks: HashMap<Cid, MaybeProcessedBlock>,
     walker: Walker,
-    process: fn(Vec<u8>) -> T,
+    process: fn(Bytes) -> Bytes,
 }
 
-impl<T: Processable> MemDriver<T> {
+impl MemDriver {
     /// Step through the record outputs, in rkey order
-    pub async fn next_chunk(&mut self, n: usize) -> Result<Option<BlockChunk<T>>, DriveError> {
+    pub async fn next_chunk(&mut self, n: usize) -> Result<Option<BlockChunk>, DriveError> {
         let mut out = Vec::with_capacity(n);
         for _ in 0..n {
             // walk as far as we can until we run out of blocks or find a record
@@ -306,52 +310,40 @@ impl<T: Processable> MemDriver<T> {
 }
 
 /// A partially memory-loaded car file that needs disk spillover to continue
-pub struct NeedDisk<R: AsyncRead + Unpin, T: Processable> {
+pub struct NeedDisk<R: AsyncRead + Unpin> {
     car: CarReader<R>,
     root: Cid,
-    process: fn(Vec<u8>) -> T,
+    process: fn(Bytes) -> Bytes,
     max_size: usize,
-    mem_blocks: HashMap<Cid, MaybeProcessedBlock<T>>,
+    mem_blocks: HashMap<Cid, MaybeProcessedBlock>,
     pub commit: Option<Commit>,
 }
 
-fn encode(v: impl Serialize) -> Result<Vec<u8>, bincode::error::EncodeError> {
-    bincode::serde::encode_to_vec(v, bincode::config::standard())
-}
-
-pub(crate) fn decode<T: Processable>(bytes: &[u8]) -> Result<T, DecodeError> {
-    let (t, n) = bincode::serde::decode_from_slice(bytes, bincode::config::standard())?;
-    if n != bytes.len() {
-        return Err(DecodeError::ExtraGarbage);
-    }
-    Ok(t)
-}
-
-impl<R: AsyncRead + Unpin, T: Processable + Send + 'static> NeedDisk<R, T> {
+impl<R: AsyncRead + Unpin> NeedDisk<R> {
     pub async fn finish_loading(
         mut self,
         mut store: DiskStore,
-    ) -> Result<(Commit, DiskDriver<T>), DriveError> {
+    ) -> Result<(Commit, DiskDriver), DriveError> {
         // move store in and back out so we can manage lifetimes
         // dump mem blocks into the store
         store = tokio::task::spawn(async move {
             let kvs = self
                 .mem_blocks
                 .into_iter()
-                .map(|(k, v)| Ok(encode(v).map(|v| (k.to_bytes(), v))?));
+                .map(|(k, v)| (k.to_bytes(), v.into_bytes()));
 
             store.put_many(kvs)?;
             Ok::<_, DriveError>(store)
         })
         .await??;
 
-        let (tx, mut rx) = mpsc::channel::<Vec<(Cid, MaybeProcessedBlock<T>)>>(1);
+        let (tx, mut rx) = mpsc::channel::<Vec<(Cid, MaybeProcessedBlock)>>(1);
 
         let store_worker = tokio::task::spawn_blocking(move || {
             while let Some(chunk) = rx.blocking_recv() {
                 let kvs = chunk
                     .into_iter()
-                    .map(|(k, v)| Ok(encode(v).map(|v| (k.to_bytes(), v))?));
+                    .map(|(k, v)| (k.to_bytes(), v.into_bytes()));
                 store.put_many(kvs)?;
             }
             Ok::<_, DriveError>(store)
@@ -372,10 +364,13 @@ impl<R: AsyncRead + Unpin, T: Processable + Send + 'static> NeedDisk<R, T> {
                     self.commit = Some(c);
                     continue;
                 }
+
+                let data = Bytes::from(data);
+
                 // remaining possible types: node, record, other. optimistically process
                 // TODO: get the actual in-memory size to compute disk spill
                 let maybe_processed = MaybeProcessedBlock::maybe(self.process, data);
-                mem_size += std::mem::size_of::<Cid>() + maybe_processed.get_size();
+                mem_size += maybe_processed.len();
                 chunk.push((cid, maybe_processed));
                 if mem_size >= self.max_size {
                     // soooooo if we're setting the db cache to max_size and then letting
@@ -418,26 +413,25 @@ struct BigState {
 }
 
 /// MST walker that reads from disk instead of an in-memory hashmap
-pub struct DiskDriver<T: Clone> {
-    process: fn(Vec<u8>) -> T,
+pub struct DiskDriver {
+    process: fn(Bytes) -> Bytes,
     state: Option<BigState>,
 }
 
 // for doctests only
 #[doc(hidden)]
-pub fn _get_fake_disk_driver() -> DiskDriver<Vec<u8>> {
-    use crate::process::noop;
+pub fn _get_fake_disk_driver() -> DiskDriver {
     DiskDriver {
         process: noop,
         state: None,
     }
 }
 
-impl<T: Processable + Send + 'static> DiskDriver<T> {
+impl DiskDriver {
     /// Walk the MST returning up to `n` rkey + record pairs
     ///
     /// ```no_run
-    /// # use repo_stream::{drive::{DiskDriver, DriveError, _get_fake_disk_driver}, process::noop};
+    /// # use repo_stream::{drive::{DiskDriver, DriveError, _get_fake_disk_driver}, noop};
     /// # #[tokio::main]
     /// # async fn main() -> Result<(), DriveError> {
     /// # let mut disk_driver = _get_fake_disk_driver();
@@ -449,7 +443,7 @@ impl<T: Processable + Send + 'static> DiskDriver<T> {
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn next_chunk(&mut self, n: usize) -> Result<Option<BlockChunk<T>>, DriveError> {
+    pub async fn next_chunk(&mut self, n: usize) -> Result<Option<BlockChunk>, DriveError> {
         let process = self.process;
 
         // state should only *ever* be None transiently while inside here
@@ -458,8 +452,8 @@ impl<T: Processable + Send + 'static> DiskDriver<T> {
         // the big pain here is that we don't want to leave self.state in an
         // invalid state (None), so all the error paths have to make sure it
         // comes out again.
-        let (state, res) = tokio::task::spawn_blocking(
-            move || -> (BigState, Result<BlockChunk<T>, DriveError>) {
+        let (state, res) =
+            tokio::task::spawn_blocking(move || -> (BigState, Result<BlockChunk, DriveError>) {
                 let mut out = Vec::with_capacity(n);
 
                 for _ in 0..n {
@@ -480,9 +474,8 @@ impl<T: Processable + Send + 'static> DiskDriver<T> {
                 }
 
                 (state, Ok::<_, DriveError>(out))
-            },
-        )
-        .await?; // on tokio JoinError, we'll be left with invalid state :(
+            })
+            .await?; // on tokio JoinError, we'll be left with invalid state :(
 
         // *must* restore state before dealing with the actual result
         self.state = Some(state);
@@ -499,12 +492,12 @@ impl<T: Processable + Send + 'static> DiskDriver<T> {
     fn read_tx_blocking(
         &mut self,
         n: usize,
-        tx: mpsc::Sender<Result<BlockChunk<T>, DriveError>>,
-    ) -> Result<(), mpsc::error::SendError<Result<BlockChunk<T>, DriveError>>> {
+        tx: mpsc::Sender<Result<BlockChunk, DriveError>>,
+    ) -> Result<(), mpsc::error::SendError<Result<BlockChunk, DriveError>>> {
         let BigState { store, walker } = self.state.as_mut().expect("valid state");
 
         loop {
-            let mut out: BlockChunk<T> = Vec::with_capacity(n);
+            let mut out: BlockChunk = Vec::with_capacity(n);
 
             for _ in 0..n {
                 // walk as far as we can until we run out of blocks or find a record
@@ -546,7 +539,7 @@ impl<T: Processable + Send + 'static> DiskDriver<T> {
     /// benefit over just using `.next_chunk(n)`.
     ///
     /// ```no_run
-    /// # use repo_stream::{drive::{DiskDriver, DriveError, _get_fake_disk_driver}, process::noop};
+    /// # use repo_stream::{drive::{DiskDriver, DriveError, _get_fake_disk_driver}, noop};
     /// # #[tokio::main]
     /// # async fn main() -> Result<(), DriveError> {
     /// # let mut disk_driver = _get_fake_disk_driver();
@@ -565,10 +558,10 @@ impl<T: Processable + Send + 'static> DiskDriver<T> {
         mut self,
         n: usize,
     ) -> (
-        mpsc::Receiver<Result<BlockChunk<T>, DriveError>>,
+        mpsc::Receiver<Result<BlockChunk, DriveError>>,
         tokio::task::JoinHandle<Self>,
     ) {
-        let (tx, rx) = mpsc::channel::<Result<BlockChunk<T>, DriveError>>(1);
+        let (tx, rx) = mpsc::channel::<Result<BlockChunk, DriveError>>(1);
 
         // sketch: this worker is going to be allowed to execute without a join handle
         let chan_task = tokio::task::spawn_blocking(move || {
