@@ -850,7 +850,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b875f1dfe14f557f805b167fb9b0fc54c5560c7a4bd6ae02535b2846f276a8cb"
 dependencies = [
  "byteorder-lite",
- "bytes",
  "byteview",
  "crossbeam-skiplist",
  "enum_dispatch",
@@ -1144,7 +1143,6 @@ checksum = "caf4aa5b0f434c91fe5c7f1ecb6a5ece2130b02ad2a590589dda5146df959001"
 name = "repo-stream"
 version = "0.2.2"
 dependencies = [
- "bytes",
  "cid",
  "clap",
  "criterion",

@@ -7,8 +7,7 @@ description = "A robust CAR file -> MST walker for atproto"
 repository = "https://tangled.org/@microcosm.blue/repo-stream"
 
 [dependencies]
-bytes = "1.11.0"
-fjall = { version = "3.0.1", default-features = false, features = ["bytes_1"] }
+fjall = { version = "3.0.1", default-features = false }
 hashbrown = "0.16.1"
 cid = { version = "0.11.1", features = ["serde"] }
 iroh-car = "0.5.1"

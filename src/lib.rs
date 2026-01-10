@@ -91,4 +91,7 @@ pub use disk::{DiskBuilder, DiskError, DiskStore};
 pub use drive::{DriveError, Driver, DriverBuilder, NeedDisk, noop};
 pub use mst::Commit;
 
+// pub use bytes::Bytes;
+pub type Bytes = Vec<u8>;
+
 pub(crate) use hashbrown::HashMap;

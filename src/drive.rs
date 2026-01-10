@@ -1,9 +1,9 @@
 //! Consume a CAR from an AsyncRead, producing an ordered stream of records
 
+use crate::Bytes;
 use crate::HashMap;
 use crate::disk::{DiskError, DiskStore};
 use crate::mst::Node;
-use bytes::Bytes;
 use cid::Cid;
 use iroh_car::CarReader;
 use std::convert::Infallible;
@@ -21,8 +21,6 @@ pub enum DriveError {
     BadBlock(#[from] serde_ipld_dagcbor::DecodeError<Infallible>),
     #[error("The Commit block reference by the root was not found")]
     MissingCommit,
-    #[error("The MST block {0} could not be found")]
-    MissingBlock(Cid),
     #[error("Failed to walk the mst tree: {0}")]
     WalkError(#[from] WalkError),
     #[error("CAR file had no roots")]
@@ -80,22 +78,20 @@ impl MaybeProcessedBlock {
     }
     pub(crate) fn into_bytes(self) -> Bytes {
         match self {
-            MaybeProcessedBlock::Raw(b) => {
-                let mut owned = b.try_into_mut().unwrap();
-                owned.extend_from_slice(&[0x00]);
-                owned.into()
+            MaybeProcessedBlock::Raw(mut b) => {
+                b.push(0x00);
+                b
             }
-            MaybeProcessedBlock::Processed(b) => {
-                let mut owned = b.try_into_mut().unwrap();
-                owned.extend_from_slice(&[0x01]);
-                owned.into()
+            MaybeProcessedBlock::Processed(mut b) => {
+                b.push(0x01);
+                b
             }
         }
     }
     pub(crate) fn from_bytes(mut b: Bytes) -> Self {
         // TODO: make sure bytes is not empty, that it's explicitly 0 or 1, etc
-        let suffix = b.split_off(b.len() - 1);
-        if *suffix == [0x00] {
+        let suffix = b.pop().unwrap();
+        if suffix == 0x00 {
             MaybeProcessedBlock::Raw(b)
         } else {
             MaybeProcessedBlock::Processed(b)
@@ -292,7 +288,6 @@ impl MemDriver {
         for _ in 0..n {
             // walk as far as we can until we run out of blocks or find a record
             match self.walker.step(&mut self.blocks, self.process)? {
-                Step::Missing(cid) => return Err(DriveError::MissingBlock(cid)),
                 Step::Finish => break,
                 Step::Found { rkey, data } => {
                     out.push((rkey, data));
@@ -465,9 +460,6 @@ impl DiskDriver {
                         }
                     };
                     match step {
-                        Step::Missing(cid) => {
-                            return (state, Err(DriveError::MissingBlock(cid)));
-                        }
                         Step::Finish => break,
                         Step::Found { rkey, data } => out.push((rkey, data)),
                     };
@@ -508,9 +500,6 @@ impl DiskDriver {
                 };
 
                 match step {
-                    Step::Missing(cid) => {
-                        return tx.blocking_send(Err(DriveError::MissingBlock(cid)));
-                    }
                     Step::Finish => return Ok(()),
                     Step::Found { rkey, data } => {
                         out.push((rkey, data));
