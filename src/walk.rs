@@ -1,10 +1,10 @@
 //! Depth-first MST traversal
 
+use crate::Bytes;
 use crate::HashMap;
 use crate::disk::DiskStore;
 use crate::drive::MaybeProcessedBlock;
 use crate::mst::Node;
-use bytes::Bytes;
 use cid::Cid;
 use sha2::{Digest, Sha256};
 use std::convert::Infallible;
@@ -20,6 +20,8 @@ pub enum WalkError {
     MstError(#[from] MstError),
     #[error("storage error: {0}")]
     StorageError(#[from] fjall::Error),
+    #[error("block not found: {0}")]
+    MissingBlock(Cid),
 }
 
 /// Errors from invalid Rkeys
@@ -44,8 +46,6 @@ pub enum MstError {
 /// Walker outputs
 #[derive(Debug)]
 pub enum Step {
-    /// We needed this CID but it's not in the block store
-    Missing(Cid),
     /// Reached the end of the MST! yay!
     Finish,
     /// A record was found!
@@ -189,8 +189,7 @@ impl Walker {
                 &mut Need::Node { depth, cid } => {
                     log::trace!("need node {cid:?}");
                     let Some(block) = blocks.remove(&cid) else {
-                        log::trace!("node not found, resting");
-                        return Ok(Step::Missing(cid));
+                        return Err(WalkError::MissingBlock(cid));
                     };
 
                     let MaybeProcessedBlock::Raw(data) = block else {
@@ -209,8 +208,8 @@ impl Walker {
                     log::trace!("need record {cid:?}");
                     // note that we cannot *remove* a record block, sadly, since
                     // there can be multiple rkeys pointing to the same cid.
-                    let Some(data) = blocks.get_mut(cid) else {
-                        return Ok(Step::Missing(*cid));
+                    let Some(data) = blocks.get(cid) else {
+                        return Err(WalkError::MissingBlock(*cid));
                     };
                     let rkey = rkey.clone();
                     let data = match data {
@@ -251,11 +250,10 @@ impl Walker {
                     let cid_bytes = cid.to_bytes();
                     log::trace!("need node {cid:?}");
                     let Some(block_slice) = reader.get(&cid_bytes)? else {
-                        log::trace!("node not found, resting");
-                        return Ok(Step::Missing(cid));
+                        return Err(WalkError::MissingBlock(cid));
                     };
 
-                    let block = MaybeProcessedBlock::from_bytes(block_slice.into()); // TODO shouldn't fjalls slice already be bytes
+                    let block = MaybeProcessedBlock::from_bytes(block_slice.to_vec());
 
                     let MaybeProcessedBlock::Raw(data) = block else {
                         return Err(WalkError::BadCommitFingerprint);
@@ -273,14 +271,13 @@ impl Walker {
                     log::trace!("need record {cid:?}");
                     let cid_bytes = cid.to_bytes();
                     let Some(data_slice) = reader.get(&cid_bytes)? else {
-                        log::trace!("record block not found, resting");
-                        return Ok(Step::Missing(*cid));
+                        return Err(WalkError::MissingBlock(*cid));
                     };
-                    let data = MaybeProcessedBlock::from_bytes(data_slice.into());
+                    let data = MaybeProcessedBlock::from_bytes(data_slice.to_vec());
                     let rkey = rkey.clone();
                     let data = match data {
                         MaybeProcessedBlock::Raw(data) => process(data),
-                        MaybeProcessedBlock::Processed(t) => t.clone(),
+                        MaybeProcessedBlock::Processed(t) => t,
                     };
 
                     // found node, make sure we remember
