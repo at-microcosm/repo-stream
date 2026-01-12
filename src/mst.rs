@@ -5,6 +5,7 @@
 
 use cid::Cid;
 use serde::Deserialize;
+use crate::walk::Depth;
 
 /// The top-level data object in a repository's tree is a signed commit.
 #[derive(Debug, Deserialize)]
@@ -33,7 +34,130 @@ pub struct Commit {
     pub prev: Option<Cid>,
     /// cryptographic signature of this commit, as raw bytes
     #[serde(with = "serde_bytes")]
-    pub sig: Vec<u8>,
+    pub sig: serde_bytes::ByteBuf,
+}
+
+use serde::{de, de::{Deserializer, Visitor, MapAccess, SeqAccess}};
+use std::fmt;
+
+pub(crate) enum NodeEntry {
+    Value(Cid, Vec<u8>), // rkey
+    Tree(Cid, u32), // depth
+}
+
+pub(crate) struct MstNode {
+    pub left: Option<Cid>, // a tree but we don't know the depth
+    pub entries: Vec<NodeEntry>,
+}
+
+pub(crate) struct Entries(pub(crate) Vec<NodeEntry>);
+
+impl<'de> Deserialize<'de> for Entries {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct EntriesVisitor;
+        impl<'de> Visitor<'de> for EntriesVisitor {
+            type Value = Entries;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("seq MstEntries")
+            }
+
+            fn visit_seq<S>(self, mut seq: S) -> Result<Self::Value, S::Error>
+            where
+                S: SeqAccess<'de>,
+            {
+                let mut children: Vec<NodeEntry> = Vec::with_capacity(seq.size_hint().unwrap_or(5));
+                let mut prefix: Vec<u8> = vec![];
+                while let Some(entry) = seq.next_element::<Entry>()? {
+                    let mut rkey: Vec<u8> = vec![];
+                    let pre_checked = prefix
+                        .get(..entry.prefix_len)
+                        // .ok_or(MstError::EntryPrefixOutOfbounds)?;
+                        .ok_or_else(|| todo!()).unwrap();
+
+                    rkey.extend_from_slice(pre_checked);
+                    rkey.extend_from_slice(&entry.keysuffix);
+                    let depth = Depth::compute(&rkey);
+
+                    prefix = rkey.clone();
+
+                    children.push(NodeEntry::Value(entry.value, rkey));
+
+                    if let Some(ref tree) = entry.tree {
+                        children.push(NodeEntry::Tree(*tree, depth));
+                    }
+                }
+                Ok(Entries(children))
+            }
+        }
+        deserializer.deserialize_seq(EntriesVisitor)
+    }
+}
+
+impl<'de> Deserialize<'de> for MstNode {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct NodeVisitor;
+        impl<'de> Visitor<'de> for NodeVisitor {
+            type Value = MstNode;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("struct MstNode")
+            }
+
+            fn visit_map<V>(self, mut map: V) -> Result<MstNode, V::Error>
+            where
+                V: MapAccess<'de>,
+            {
+                let mut found_left = false;
+                let mut left = None;
+                let mut found_entries = false;
+                let mut entries = Vec::with_capacity(4); // "fanout of 4" so does this make sense????
+
+                while let Some(key) = map.next_key()? {
+                    match key {
+                        "l" => {
+                            if found_left {
+                                return Err(de::Error::duplicate_field("l"));
+                            }
+                            found_left = true;
+                            left = map.next_value()?;
+                        }
+                        "e" => {
+                            if found_entries {
+                                return Err(de::Error::duplicate_field("e"));
+                            }
+                            found_entries = true;
+                            let mut child_entries: Entries = map.next_value()?;
+                            entries.append(&mut child_entries.0);
+                        },
+                        f => return Err(de::Error::unknown_field(f, NODE_FIELDS))
+                    }
+                }
+                if !found_left {
+                    return Err(de::Error::missing_field("l"));
+                }
+                if !found_entries {
+                    return Err(de::Error::missing_field("e"));
+                }
+                Ok(MstNode { left, entries })
+            }
+        }
+
+        const NODE_FIELDS: &[&str] = &["l", "e"];
+        deserializer.deserialize_struct("MstNode", NODE_FIELDS, NodeVisitor)
+    }
+}
+
+impl MstNode {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.left.is_none() && self.entries.is_empty()
+    }
 }
 
 /// MST node data schema
@@ -62,6 +186,7 @@ impl Node {
     /// so if a block *could be* a node, any record converter must postpone
     /// processing. if it turns out it happens to be a very node-looking record,
     /// well, sorry, it just has to only be processed later when that's known.
+    #[inline(always)]
     pub(crate) fn could_be(bytes: impl AsRef<[u8]>) -> bool {
         const NODE_FINGERPRINT: [u8; 3] = [
             0xA2, // map length 2 (for "l" and "e" keys)
@@ -77,15 +202,15 @@ impl Node {
                 .unwrap_or(false)
     }
 
-    /// Check if a node has any entries
-    ///
-    /// An empty repository with no records is represented as a single MST node
-    /// with an empty array of entries. This is the only situation in which a
-    /// tree may contain an empty leaf node which does not either contain keys
-    /// ("entries") or point to a sub-tree containing entries.
-    pub(crate) fn is_empty(&self) -> bool {
-        self.left.is_none() && self.entries.is_empty()
-    }
+    // /// Check if a node has any entries
+    // ///
+    // /// An empty repository with no records is represented as a single MST node
+    // /// with an empty array of entries. This is the only situation in which a
+    // /// tree may contain an empty leaf node which does not either contain keys
+    // /// ("entries") or point to a sub-tree containing entries.
+    // pub(crate) fn is_empty(&self) -> bool {
+    //     self.left.is_none() && self.entries.is_empty()
+    // }
 }
 
 /// TreeEntry object
@@ -96,8 +221,8 @@ pub(crate) struct Entry {
     #[serde(rename = "p")]
     pub prefix_len: usize,
     /// remainder of key for this TreeEntry, after "prefixlen" have been removed
-    #[serde(rename = "k", with = "serde_bytes")]
-    pub keysuffix: Vec<u8>, // can we String this here?
+    #[serde(rename = "k")]
+    pub keysuffix: serde_bytes::ByteBuf,
     /// link to the record data (CBOR) for this entry
     #[serde(rename = "v")]
     pub value: Cid,
