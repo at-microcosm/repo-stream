@@ -33,8 +33,9 @@ async fn drive_car(bytes: &[u8]) -> usize {
         .await
         .unwrap()
     {
-        Driver::Memory(_, mem_driver) => mem_driver,
-        Driver::Disk(_) => panic!("not benching big cars here"),
+        None => return 0,
+        Some(Driver::Memory(_, mem_driver)) => mem_driver,
+        Some(Driver::Disk(_)) => panic!("not benching big cars here"),
     };
 
     let mut n = 0;

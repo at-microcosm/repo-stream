@@ -1,13 +1,14 @@
 //! Depth-first MST traversal
 
-use crate::mst::NodeEntry;
+use crate::mst::NodeThing;
+use crate::mst::ThingKind;
 use crate::mst::MstNode;
+use crate::mst::Depth;
 use crate::Bytes;
 use crate::HashMap;
 use crate::disk::DiskStore;
 use crate::drive::MaybeProcessedBlock;
 use cid::Cid;
-use sha2::{Digest, Sha256};
 use std::convert::Infallible;
 
 /// Errors that can happen while walking
@@ -28,119 +29,24 @@ pub enum WalkError {
 /// Errors from invalid Rkeys
 #[derive(Debug, PartialEq, thiserror::Error)]
 pub enum MstError {
-    #[error("Failed to compute an rkey due to invalid prefix_len")]
-    EntryPrefixOutOfbounds,
     #[error("RKey was not utf-8")]
     EntryRkeyNotUtf8(#[from] std::string::FromUtf8Error),
     #[error("Nodes cannot be empty (except for an entirely empty MST)")]
     EmptyNode,
-    #[error("Found an entry with rkey at the wrong depth")]
-    WrongDepth,
-    #[error("Lost track of our depth (possible bug?)")]
-    LostDepth,
+    #[error("Expected node to be at depth {expected}, but it was at {depth}")]
+    WrongDepth { depth: Depth, expected: Depth },
     #[error("MST depth underflow: depth-0 node with child trees")]
     DepthUnderflow,
-    #[error("Encountered an rkey out of order while walking the MST")]
-    RkeyOutOfOrder,
+    #[error("Encountered rkey {rkey:?} which cannot follow the previous: {prev:?}")]
+    RkeyOutOfOrder { prev: String, rkey: String },
 }
 
 /// Walker outputs
-#[derive(Debug)]
-pub enum Step {
-    /// Reached the end of the MST! yay!
-    Finish,
-    /// A record was found!
-    Found { rkey: String, data: Bytes },
-}
-
-#[derive(Debug, Clone, PartialEq)]
-enum Need {
-    Node { depth: Depth, cid: Cid },
-    Record { rkey: String, cid: Cid },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum Depth {
-    Root,
-    Depth(u32),
-}
-
-impl Depth {
-    fn from_key(key: &[u8]) -> Self {
-        let mut zeros = 0;
-        for byte in Sha256::digest(key) {
-            let leading = byte.leading_zeros();
-            zeros += leading;
-            if leading < 8 {
-                break;
-            }
-        }
-        Self::Depth(zeros / 2) // truncating divide (rounds down)
-    }
-    fn next_expected(&self) -> Result<Option<u32>, MstError> {
-        match self {
-            Self::Root => Ok(None),
-            Self::Depth(d) => d.checked_sub(1).ok_or(MstError::DepthUnderflow).map(Some),
-        }
-    }
-    pub fn compute(key: &[u8]) -> u32 {
-        let Depth::Depth(d) = Self::from_key(key) else {
-            panic!("errr");
-        };
-        d
-    }
-}
-
-fn push_from_node(stack: &mut Vec<Need>, node: &MstNode, parent_depth: Depth) -> Result<(), MstError> {
-    // empty nodes are not allowed in the MST except in an empty MST
-    if node.is_empty() {
-        if parent_depth == Depth::Root {
-            return Ok(()); // empty mst, nothing to push
-        } else {
-            return Err(MstError::EmptyNode);
-        }
-    }
-
-    let mut this_depth = parent_depth.next_expected()?;
-
-    for entry in node.entries.iter().rev() {
-        // ok this loop sucks now esp with depth checking
-        // should keep the entries together with a shared depth on the rkey
-        // ...maybe. skipping the absent trees is nice?
-        match entry {
-            NodeEntry::Value(cid, rkey) => {
-                stack.push(Need::Record {
-                    rkey: String::from_utf8(rkey.to_vec())?,
-                    cid: *cid,
-                });
-            }
-            NodeEntry::Tree(cid, depth) => {
-                if let Some(expected) = this_depth {
-                    if *depth != expected {
-                        return Err(MstError::WrongDepth);
-                    }
-                } else {
-                    // this_depth is `none` if we are the deepest child (directly below root)
-                    // in that case we accept whatever highest depth is claimed
-                    this_depth = Some(*depth);
-                }
-                stack.push(Need::Node {
-                    depth: Depth::Depth(*depth),
-                    cid: *cid,
-                });
-            }
-        }
-
-    }
-
-    let d = this_depth.ok_or(MstError::LostDepth)?;
-    if let Some(tree) = node.left {
-        stack.push(Need::Node {
-            depth: Depth::Depth(d),
-            cid: tree,
-        });
-    }
-    Ok(())
+#[derive(Debug, PartialEq)]
+pub struct Output {
+    pub rkey: String,
+    pub cid: Cid,
+    pub data: Bytes,
 }
 
 /// Traverser of an atproto MST
@@ -148,18 +54,85 @@ fn push_from_node(stack: &mut Vec<Need>, node: &MstNode, parent_depth: Depth) ->
 /// Walks the tree from left-to-right in depth-first order
 #[derive(Debug)]
 pub struct Walker {
-    stack: Vec<Need>,
-    prev: String,
+    prev_rkey: String,
+    todo: Vec<(Depth, NodeThing)>,
 }
 
 impl Walker {
-    pub fn new(tree_root_cid: Cid) -> Self {
+    pub fn new(
+        root_cid: Cid,
+        depth: Depth,
+    ) -> Self {
         Self {
-            stack: vec![Need::Node {
-                depth: Depth::Root,
-                cid: tree_root_cid,
-            }],
-            prev: "".to_string(),
+            prev_rkey: "".to_string(),
+            todo: vec![(
+                depth + 1, // we're kind of inventing a fake root one above the real root
+                // ... maybe we should just pass in the real root here???
+                NodeThing {
+                    cid: root_cid,
+                    kind: ThingKind::Tree,
+                },
+            )],
+        }
+    }
+
+    fn mpb_step(
+        &mut self,
+        depth: Depth,
+        kind: ThingKind,
+        cid: Cid,
+        mpb: &MaybeProcessedBlock,
+        process: impl Fn(Bytes) -> Bytes,
+    ) -> Result<Option<Output>, WalkError> {
+        match kind {
+            ThingKind::Value { rkey } => {
+                let data = match mpb {
+                    MaybeProcessedBlock::Raw(data) => process(data.clone()),
+                    MaybeProcessedBlock::Processed(t) => t.clone(),
+                };
+
+                if rkey <= self.prev_rkey {
+                    return Err(WalkError::MstError(MstError::RkeyOutOfOrder {
+                        rkey,
+                        prev: self.prev_rkey.clone(),
+                    }));
+                }
+                self.prev_rkey = rkey.clone();
+
+                Ok(Some(Output {
+                    rkey,
+                    cid,
+                    data,
+                }))
+            }
+            ThingKind::Tree => {
+                let MaybeProcessedBlock::Raw(data) = mpb else {
+                    return Err(WalkError::BadCommitFingerprint);
+                };
+
+                let node: MstNode = serde_ipld_dagcbor::from_slice(&data)
+                    .map_err(WalkError::BadCommit)?;
+
+                if node.is_empty() {
+                    return Err(WalkError::MstError(MstError::EmptyNode));
+                }
+
+                let next_depth = depth.checked_sub(1).ok_or(MstError::DepthUnderflow)?;
+                if let Some(d) = node.depth {
+                    if d != next_depth {
+                        return Err(WalkError::MstError(MstError::WrongDepth {
+                            depth: d,
+                            expected: next_depth,
+                        }));
+                    }
+                }
+
+                for thing in node.things {
+                    self.todo.push((next_depth, thing));
+                }
+
+                Ok(None)
+            }
         }
     }
 
@@ -168,124 +141,39 @@ impl Walker {
         &mut self,
         blocks: &mut HashMap<Cid, MaybeProcessedBlock>,
         process: impl Fn(Bytes) -> Bytes,
-    ) -> Result<Step, WalkError> {
-        loop {
-            let Some(need) = self.stack.last_mut() else {
-                log::trace!("tried to walk but we're actually done.");
-                return Ok(Step::Finish);
+    ) -> Result<Option<Output>, WalkError> {
+
+        while let Some((depth, NodeThing { cid, kind })) = self.todo.pop() {
+            let Some(mpb) = blocks.get(&cid) else {
+                return Err(WalkError::MissingBlock(cid));
             };
-
-            match need {
-                &mut Need::Node { depth, cid } => {
-                    log::trace!("need node {cid:?}");
-                    let Some(block) = blocks.remove(&cid) else {
-                        return Err(WalkError::MissingBlock(cid));
-                    };
-
-                    let MaybeProcessedBlock::Raw(data) = block else {
-                        return Err(WalkError::BadCommitFingerprint);
-                    };
-                    let node = serde_ipld_dagcbor::from_slice::<crate::mst::MstNode>(&data)
-                        .map_err(WalkError::BadCommit)?;
-
-                    // found node, make sure we remember
-                    self.stack.pop();
-
-                    // queue up work on the found node next
-                    push_from_node(&mut self.stack, &node, depth)?;
-                }
-                Need::Record { rkey, cid } => {
-                    log::trace!("need record {cid:?}");
-                    // note that we cannot *remove* a record block, sadly, since
-                    // there can be multiple rkeys pointing to the same cid.
-                    let Some(data) = blocks.get(cid) else {
-                        return Err(WalkError::MissingBlock(*cid));
-                    };
-                    let rkey = rkey.clone();
-                    let data = match data {
-                        MaybeProcessedBlock::Raw(data) => process(data.clone()),
-                        MaybeProcessedBlock::Processed(t) => t.clone(),
-                    };
-
-                    // found node, make sure we remember
-                    self.stack.pop();
-
-                    // rkeys *must* be in order or else the tree is invalid (or
-                    // we have a bug)
-                    if rkey <= self.prev {
-                        return Err(MstError::RkeyOutOfOrder)?;
-                    }
-                    self.prev = rkey.clone();
-
-                    return Ok(Step::Found { rkey, data });
-                }
+            if let Some(out) = self.mpb_step(depth, kind, cid, mpb, &process)? {
+                return Ok(Some(out));
             }
         }
+
+        log::trace!("tried to walk but we're actually done.");
+        Ok(None)
     }
 
     /// blocking!!!!!!
     pub fn disk_step(
         &mut self,
-        reader: &mut DiskStore,
+        blocks: &mut DiskStore,
         process: impl Fn(Bytes) -> Bytes,
-    ) -> Result<Step, WalkError> {
-        loop {
-            let Some(need) = self.stack.last_mut() else {
-                log::trace!("tried to walk but we're actually done.");
-                return Ok(Step::Finish);
+    ) -> Result<Option<Output>, WalkError> {
+
+        while let Some((depth, NodeThing { cid, kind })) = self.todo.pop() {
+            let Some(block_slice) = blocks.get(&cid.to_bytes())? else {
+                return Err(WalkError::MissingBlock(cid));
             };
-
-            match need {
-                &mut Need::Node { depth, cid } => {
-                    let cid_bytes = cid.to_bytes();
-                    log::trace!("need node {cid:?}");
-                    let Some(block_slice) = reader.get(&cid_bytes)? else {
-                        return Err(WalkError::MissingBlock(cid));
-                    };
-
-                    let block = MaybeProcessedBlock::from_bytes(block_slice.to_vec());
-
-                    let MaybeProcessedBlock::Raw(data) = block else {
-                        return Err(WalkError::BadCommitFingerprint);
-                    };
-                    let node = serde_ipld_dagcbor::from_slice::<MstNode>(&data)
-                        .map_err(WalkError::BadCommit)?;
-
-                    // found node, make sure we remember
-                    self.stack.pop();
-
-                    // queue up work on the found node next
-                    push_from_node(&mut self.stack, &node, depth).map_err(WalkError::MstError)?;
-                }
-                Need::Record { rkey, cid } => {
-                    log::trace!("need record {cid:?}");
-                    let cid_bytes = cid.to_bytes();
-                    let Some(data_slice) = reader.get(&cid_bytes)? else {
-                        return Err(WalkError::MissingBlock(*cid));
-                    };
-                    let data = MaybeProcessedBlock::from_bytes(data_slice.to_vec());
-                    let rkey = rkey.clone();
-                    let data = match data {
-                        MaybeProcessedBlock::Raw(data) => process(data),
-                        MaybeProcessedBlock::Processed(t) => t,
-                    };
-
-                    // found node, make sure we remember
-                    self.stack.pop();
-
-                    log::trace!("emitting a block as a step. depth={}", self.stack.len());
-
-                    // rkeys *must* be in order or else the tree is invalid (or
-                    // we have a bug)
-                    if rkey <= self.prev {
-                        return Err(MstError::RkeyOutOfOrder)?;
-                    }
-                    self.prev = rkey.clone();
-
-                    return Ok(Step::Found { rkey, data });
-                }
+            let mpb = MaybeProcessedBlock::from_bytes(block_slice.to_vec());
+            if let Some(out) = self.mpb_step(depth, kind, cid, &mpb, &process)? {
+                return Ok(Some(out));
             }
         }
+        log::trace!("tried to walk but we're actually done.");
+        Ok(None)
     }
 }
 
@@ -293,72 +181,11 @@ impl Walker {
 mod test {
     use super::*;
 
-    fn cid1() -> Cid {
-        "bafyreihixenvk3ahqbytas4hk4a26w43bh6eo3w6usjqtxkpzsvi655a3m"
-            .parse()
-            .unwrap()
-    }
-
-    #[test]
-    fn test_depth_spec_0() {
-        let d = Depth::from_key(b"2653ae71");
-        assert_eq!(d, Depth::Depth(0))
-    }
-
-    #[test]
-    fn test_depth_spec_1() {
-        let d = Depth::from_key(b"blue");
-        assert_eq!(d, Depth::Depth(1))
-    }
-
-    #[test]
-    fn test_depth_spec_4() {
-        let d = Depth::from_key(b"app.bsky.feed.post/454397e440ec");
-        assert_eq!(d, Depth::Depth(4))
-    }
-
-    #[test]
-    fn test_depth_spec_8() {
-        let d = Depth::from_key(b"app.bsky.feed.post/9adeb165882c");
-        assert_eq!(d, Depth::Depth(8))
-    }
-
-    #[test]
-    fn test_depth_ietf_draft_0() {
-        let d = Depth::from_key(b"key1");
-        assert_eq!(d, Depth::Depth(0))
-    }
-
-    #[test]
-    fn test_depth_ietf_draft_1() {
-        let d = Depth::from_key(b"key7");
-        assert_eq!(d, Depth::Depth(1))
-    }
-
-    #[test]
-    fn test_depth_ietf_draft_4() {
-        let d = Depth::from_key(b"key515");
-        assert_eq!(d, Depth::Depth(4))
-    }
-
-    #[test]
-    fn test_depth_interop() {
-        // examples from https://github.com/bluesky-social/atproto-interop-tests/blob/main/mst/key_heights.json
-        for (k, expected) in [
-            ("", 0),
-            ("asdf", 0),
-            ("blue", 1),
-            ("2653ae71", 0),
-            ("88bfafc7", 2),
-            ("2a92d355", 4),
-            ("884976f5", 6),
-            ("app.bsky.feed.post/454397e440ec", 4),
-            ("app.bsky.feed.post/9adeb165882c", 8),
-        ] {
-            let d = Depth::from_key(k.as_bytes());
-            assert_eq!(d, Depth::Depth(expected), "key: {}", k);
-        }
-    }
+    // fn cid1() -> Cid {
+    //     "bafyreihixenvk3ahqbytas4hk4a26w43bh6eo3w6usjqtxkpzsvi655a3m"
+    //         .parse()
+    //         .unwrap()
+    // }
 
     // #[test]
     // fn test_push_empty_fails() {

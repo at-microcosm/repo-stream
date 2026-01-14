@@ -43,8 +43,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .load_car(reader)
         .await?
     {
-        Driver::Memory(_, _) => panic!("try this on a bigger car"),
-        Driver::Disk(big_stuff) => {
+        None => panic!("empty mst! try a bigger car"),
+        Some(Driver::Memory(_, _)) => panic!("try this on a bigger car"),
+        Some(Driver::Disk(big_stuff)) => {
             // we reach here if the repo was too big and needs to be spilled to
             // disk to continue
 
@@ -61,6 +62,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // pop the driver back out to get some code indentation relief
             driver
         }
+    };
+
+    let Some(driver) = driver else {
+        panic!("big car but somehow empty MST: is the archive stuffed with garbage?");
     };
 
     // collect some random stats about the blocks

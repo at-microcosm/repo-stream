@@ -3,9 +3,9 @@
 //! The primary aim is to work through the **tree** structure. Non-node blocks
 //! are left as raw bytes, for upper levels to parse into DAG-CBOR or whatever.
 
+use sha2::{Digest, Sha256};
 use cid::Cid;
 use serde::Deserialize;
-use crate::walk::Depth;
 
 /// The top-level data object in a repository's tree is a signed commit.
 #[derive(Debug, Deserialize)]
@@ -37,20 +37,36 @@ pub struct Commit {
     pub sig: serde_bytes::ByteBuf,
 }
 
-use serde::{de, de::{Deserializer, Visitor, MapAccess, SeqAccess}};
+use serde::de::{self, Deserializer, Visitor, MapAccess, SeqAccess, Unexpected};
 use std::fmt;
 
-pub(crate) enum NodeEntry {
-    Value(Cid, Vec<u8>), // rkey
-    Tree(Cid, u32), // depth
+pub type Depth = u32;
+
+#[inline(always)]
+pub fn atproto_mst_depth(key: &str) -> Depth {
+    // 128 bits oughta be enough: https://bsky.app/profile/retr0.id/post/3jwwbf4izps24
+    u128::from_be_bytes(Sha256::digest(key).split_at(16).0.try_into().unwrap()).leading_zeros() / 2
 }
 
+#[derive(Debug)]
 pub(crate) struct MstNode {
-    pub left: Option<Cid>, // a tree but we don't know the depth
-    pub entries: Vec<NodeEntry>,
+    pub depth: Option<Depth>, // known for nodes with entries (required for root)
+    pub things: Vec<NodeThing>,
 }
 
-pub(crate) struct Entries(pub(crate) Vec<NodeEntry>);
+#[derive(Debug)]
+pub(crate) struct NodeThing {
+    pub(crate) cid: Cid,
+    pub(crate) kind: ThingKind,
+}
+
+#[derive(Debug)]
+pub(crate) enum ThingKind {
+    Tree,
+    Value { rkey: String },
+}
+
+pub(crate) struct Entries(Vec<NodeThing>, Option<Depth>);
 
 impl<'de> Deserialize<'de> for Entries {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
@@ -69,28 +85,53 @@ impl<'de> Deserialize<'de> for Entries {
             where
                 S: SeqAccess<'de>,
             {
-                let mut children: Vec<NodeEntry> = Vec::with_capacity(seq.size_hint().unwrap_or(5));
+                let mut children: Vec<NodeThing> = Vec::with_capacity(seq.size_hint().unwrap_or(5));
                 let mut prefix: Vec<u8> = vec![];
+                let mut depth = None;
                 while let Some(entry) = seq.next_element::<Entry>()? {
                     let mut rkey: Vec<u8> = vec![];
                     let pre_checked = prefix
                         .get(..entry.prefix_len)
-                        // .ok_or(MstError::EntryPrefixOutOfbounds)?;
-                        .ok_or_else(|| todo!()).unwrap();
+                        .ok_or_else(|| de::Error::invalid_value(
+                            Unexpected::Bytes(&prefix),
+                            &"a prefix at least as long as the prefix_len",
+                        ))?;
 
                     rkey.extend_from_slice(pre_checked);
                     rkey.extend_from_slice(&entry.keysuffix);
-                    let depth = Depth::compute(&rkey);
 
-                    prefix = rkey.clone();
+                    let rkey_s = String::from_utf8(rkey.clone())
+                        .map_err(|_| de::Error::invalid_value(
+                            Unexpected::Bytes(&rkey),
+                            &"a valid utf-8 rkey",
+                        ))?;
 
-                    children.push(NodeEntry::Value(entry.value, rkey));
-
-                    if let Some(ref tree) = entry.tree {
-                        children.push(NodeEntry::Tree(*tree, depth));
+                    let key_depth = atproto_mst_depth(&rkey_s);
+                    if depth.is_none() {
+                        depth = Some(key_depth);
+                    } else if Some(key_depth) != depth {
+                        return Err(de::Error::invalid_value(
+                            Unexpected::Bytes(&prefix),
+                            &"all rkeys to have equal MST depth",
+                        ));
                     }
+
+                    children.push(NodeThing {
+                        cid: entry.value,
+                        kind: ThingKind::Value { rkey: rkey_s },
+                    });
+
+                    if let Some(cid) = entry.tree {
+                        children.push(NodeThing {
+                            cid,
+                            kind: ThingKind::Tree,
+                        });
+                    }
+
+                    prefix = rkey;
                 }
-                Ok(Entries(children))
+
+                Ok(Entries(children, depth))
             }
         }
         deserializer.deserialize_seq(EntriesVisitor)
@@ -117,7 +158,8 @@ impl<'de> Deserialize<'de> for MstNode {
                 let mut found_left = false;
                 let mut left = None;
                 let mut found_entries = false;
-                let mut entries = Vec::with_capacity(4); // "fanout of 4" so does this make sense????
+                let mut things = Vec::with_capacity(4); // "fanout of 4" so does this make sense????
+                let mut depth = None;
 
                 while let Some(key) = map.next_key()? {
                     match key {
@@ -126,15 +168,18 @@ impl<'de> Deserialize<'de> for MstNode {
                                 return Err(de::Error::duplicate_field("l"));
                             }
                             found_left = true;
-                            left = map.next_value()?;
+                            if let Some(cid) = map.next_value()? {
+                                left = Some(NodeThing { cid, kind: ThingKind::Tree });
+                            }
                         }
                         "e" => {
                             if found_entries {
                                 return Err(de::Error::duplicate_field("e"));
                             }
                             found_entries = true;
-                            let mut child_entries: Entries = map.next_value()?;
-                            entries.append(&mut child_entries.0);
+                            let Entries(mut child_entries, d) = map.next_value()?;
+                            things.append(&mut child_entries);
+                            depth = d;
                         },
                         f => return Err(de::Error::unknown_field(f, NODE_FIELDS))
                     }
@@ -145,7 +190,13 @@ impl<'de> Deserialize<'de> for MstNode {
                 if !found_entries {
                     return Err(de::Error::missing_field("e"));
                 }
-                Ok(MstNode { left, entries })
+
+                things.reverse();
+                if let Some(l) = left {
+                    things.push(l);
+                }
+
+                Ok(MstNode { depth, things })
             }
         }
 
@@ -156,7 +207,7 @@ impl<'de> Deserialize<'de> for MstNode {
 
 impl MstNode {
     pub(crate) fn is_empty(&self) -> bool {
-        self.left.is_none() && self.entries.is_empty()
+        self.things.is_empty()
     }
 }
 

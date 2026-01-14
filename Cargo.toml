@@ -15,7 +15,7 @@ log = "0.4.28"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_bytes = "0.11.19"
 serde_ipld_dagcbor = "0.6.4"
-sha2 = "0.10.9"
+sha2 = "0.10.9" # note: hmac-sha256 is simpler, smaller, benches ~15ns slower
 thiserror = "2.0.17"
 tokio = { version = "1.47.1", features = ["rt", "sync"] }
 
@@ -42,3 +42,7 @@ harness = false
 [[bench]]
 name = "huge-car"
 harness = false
+
+# [[bench]]
+# name = "leading"
+# harness = false
