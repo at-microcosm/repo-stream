@@ -23,8 +23,6 @@ pub enum WalkError {
 /// Errors from invalid Rkeys
 #[derive(Debug, PartialEq, thiserror::Error)]
 pub enum MstError {
-    #[error("RKey was not utf-8")]
-    EntryRkeyNotUtf8(#[from] std::string::FromUtf8Error),
     #[error("Nodes cannot be empty (except for an entirely empty MST)")]
     EmptyNode,
     #[error("Expected node to be at depth {expected}, but it was at {depth}")]
