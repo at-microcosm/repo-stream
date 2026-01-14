@@ -86,12 +86,12 @@ use mimalloc::MiMalloc;
 static GLOBAL: MiMalloc = MiMalloc;
 ```
 
-- 450MiB CAR file: `1.1s` (-15%)
-- 128MiB: `310ms` (-13%)
-- 5.0MiB: `6.1ms` (-10%)
-- 279KiB: `160us` (-5%)
-- 3.4KiB: `5.7us` (-9%)
-- empty: `660ns` (-7%)
+- 450MiB CAR file: `1.2s` (-8%)
+- 128MiB: `300ms` (-14%)
+- 5.0MiB: `6.0ms` (-12%)
+- 279KiB: `140us` (-21%)
+- 3.4KiB: `4.7us` (-10%)
+- empty: `640ns` (-4%)
 
 processing CARs requires buffering blocks, so it can consume a lot of memory. repo-stream's in-memory driver has minimal memory overhead, but there are two ways to make it work with less mem (you can do either or both!)
 

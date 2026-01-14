@@ -22,12 +22,18 @@ pub fn criterion_benchmark(c: &mut Criterion) {
     });
 }
 
+#[inline(always)]
+fn ser(block: Vec<u8>) -> Vec<u8> {
+    let s = block.len();
+    usize::to_ne_bytes(s).to_vec()
+}
+
 async fn drive_car(filename: impl AsRef<Path>) -> usize {
     let reader = tokio::fs::File::open(filename).await.unwrap();
     let reader = tokio::io::BufReader::new(reader);
 
     let mut driver =
-        match Driver::load_car(reader, |block| block.len().to_le_bytes().to_vec(), 1024)
+        match Driver::load_car(reader, ser, 1024)
             .await
             .unwrap()
             .unwrap()
