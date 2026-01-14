@@ -39,10 +39,7 @@ fn ser(block: Vec<u8>) -> Vec<u8> {
 }
 
 async fn drive_car(bytes: &[u8]) -> usize {
-    let mut driver = match Driver::load_car(bytes, ser, 32)
-        .await
-        .unwrap()
-    {
+    let mut driver = match Driver::load_car(bytes, ser, 32).await.unwrap() {
         None => return 0,
         Some(Driver::Memory(_, mem_driver)) => mem_driver,
         Some(Driver::Disk(_)) => panic!("not benching big cars here"),

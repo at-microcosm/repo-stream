@@ -3,9 +3,9 @@
 //! The primary aim is to work through the **tree** structure. Non-node blocks
 //! are left as raw bytes, for upper levels to parse into DAG-CBOR or whatever.
 
-use sha2::{Digest, Sha256};
 use cid::Cid;
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 
 /// The top-level data object in a repository's tree is a signed commit.
 #[derive(Debug, Deserialize)]
@@ -37,7 +37,7 @@ pub struct Commit {
     pub sig: serde_bytes::ByteBuf,
 }
 
-use serde::de::{self, Deserializer, Visitor, MapAccess, Unexpected};
+use serde::de::{self, Deserializer, MapAccess, Unexpected, Visitor};
 use std::fmt;
 
 pub type Depth = u32;
@@ -97,7 +97,10 @@ impl<'de> Deserialize<'de> for MstNode {
                             }
                             found_left = true;
                             if let Some(cid) = map.next_value()? {
-                                left = Some(NodeThing { cid, kind: ThingKind::Tree });
+                                left = Some(NodeThing {
+                                    cid,
+                                    kind: ThingKind::Tree,
+                                });
                             }
                         }
                         "e" => {
@@ -110,21 +113,23 @@ impl<'de> Deserialize<'de> for MstNode {
 
                             for entry in map.next_value::<Vec<Entry>>()? {
                                 let mut rkey: Vec<u8> = vec![];
-                                let pre_checked = prefix
-                                    .get(..entry.prefix_len)
-                                    .ok_or_else(|| de::Error::invalid_value(
-                                        Unexpected::Bytes(&prefix),
-                                        &"a prefix at least as long as the prefix_len",
-                                    ))?;
+                                let pre_checked =
+                                    prefix.get(..entry.prefix_len).ok_or_else(|| {
+                                        de::Error::invalid_value(
+                                            Unexpected::Bytes(&prefix),
+                                            &"a prefix at least as long as the prefix_len",
+                                        )
+                                    })?;
 
                                 rkey.extend_from_slice(pre_checked);
                                 rkey.extend_from_slice(&entry.keysuffix);
 
-                                let rkey_s = String::from_utf8(rkey.clone())
-                                    .map_err(|_| de::Error::invalid_value(
+                                let rkey_s = String::from_utf8(rkey.clone()).map_err(|_| {
+                                    de::Error::invalid_value(
                                         Unexpected::Bytes(&rkey),
                                         &"a valid utf-8 rkey",
-                                    ))?;
+                                    )
+                                })?;
 
                                 let key_depth = atproto_mst_depth(&rkey_s);
                                 if depth.is_none() {
@@ -150,8 +155,8 @@ impl<'de> Deserialize<'de> for MstNode {
 
                                 prefix = rkey;
                             }
-                        },
-                        f => return Err(de::Error::unknown_field(f, NODE_FIELDS))
+                        }
+                        f => return Err(de::Error::unknown_field(f, NODE_FIELDS)),
                     }
                 }
                 if !found_left {

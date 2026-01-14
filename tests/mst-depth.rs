@@ -205,11 +205,7 @@ fn test_spec_example_keys() {
 #[test]
 fn test_ietf_example_keys() {
     // https://atproto.com/specs/repository#mst-structure
-    for (key, expected) in [
-        ("key1", 0),
-        ("key7", 1),
-        ("key515", 4),
-    ] {
+    for (key, expected) in [("key1", 0), ("key7", 1), ("key515", 4)] {
         let computed = atproto_mst_depth(key);
         assert_eq!(computed, expected);
     }
