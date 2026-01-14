@@ -71,7 +71,8 @@ older stuff (to clean up):
 
 current car processing times (records processed into their length usize, phil's dev machine):
 
-- 128MiB CAR file: `350ms`
+- 450MiB CAR file (huge): `1.3s`
+- 128MiB (huge): `350ms`
 - 5.0MiB: `6.8ms`
 - 279KiB: `170us`
 - 3.4KiB: `5.2us`
@@ -85,14 +86,39 @@ use mimalloc::MiMalloc;
 static GLOBAL: MiMalloc = MiMalloc;
 ```
 
-- 128MiB CAR file: `310ms` (-13%)
+- 450MiB CAR file: `1.1s` (-15%)
+- 128MiB: `310ms` (-13%)
 - 5.0MiB: `6.1ms` (-10%)
 - 279KiB: `160us` (-5%)
 - 3.4KiB: `5.7us` (-9%)
 - empty: `660ns` (-7%)
 
+processing CARs requires buffering blocks, so it can consume a lot of memory. repo-stream's in-memory driver has minimal memory overhead, but there are two ways to make it work with less mem (you can do either or both!)
 
-running the huge-car benchmark
+1. spill blocks to disk
+2. inline block processing
+
+#### spill blocks to disk
+
+this is a little slower but can greatly reduce the memory used. there's nothing special you need to do for this.
+
+
+#### inline block processing
+
+if you don't need to store the complete records, you can have repo-stream try to optimistically apply a processing function to the raw blocks as they are streamed in.
+
+
+#### constrained mem perf comparison
+
+sketchy benchmark but hey. mimalloc is enabled, and the processing spills to disk. inline processing reduces entire records to 8 bytes (usize of the raw record block size):
+
+- 450MiB CAR file: `5.0s` (4.5x slowdown for disk)
+- 128MiB: `1.27s` (4.1x slowdown)
+
+fortunately, most CARs in the ATmosphere are very small, so for eg. backfill purposes, the vast majority of inputs will not face this slowdown.
+
+
+#### running the huge-car benchmark
 
 - to avoid committing it to the repo, you have to pass it in through the env for now.
 
