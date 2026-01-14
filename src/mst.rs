@@ -37,7 +37,7 @@ pub struct Commit {
     pub sig: serde_bytes::ByteBuf,
 }
 
-use serde::de::{self, Deserializer, Visitor, MapAccess, SeqAccess, Unexpected};
+use serde::de::{self, Deserializer, Visitor, MapAccess, Unexpected};
 use std::fmt;
 
 pub type Depth = u32;
@@ -66,78 +66,6 @@ pub(crate) enum ThingKind {
     Value { rkey: String },
 }
 
-pub(crate) struct Entries(Vec<NodeThing>, Option<Depth>);
-
-impl<'de> Deserialize<'de> for Entries {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        struct EntriesVisitor;
-        impl<'de> Visitor<'de> for EntriesVisitor {
-            type Value = Entries;
-
-            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-                formatter.write_str("seq MstEntries")
-            }
-
-            fn visit_seq<S>(self, mut seq: S) -> Result<Self::Value, S::Error>
-            where
-                S: SeqAccess<'de>,
-            {
-                let mut children: Vec<NodeThing> = Vec::with_capacity(seq.size_hint().unwrap_or(5));
-                let mut prefix: Vec<u8> = vec![];
-                let mut depth = None;
-                while let Some(entry) = seq.next_element::<Entry>()? {
-                    let mut rkey: Vec<u8> = vec![];
-                    let pre_checked = prefix
-                        .get(..entry.prefix_len)
-                        .ok_or_else(|| de::Error::invalid_value(
-                            Unexpected::Bytes(&prefix),
-                            &"a prefix at least as long as the prefix_len",
-                        ))?;
-
-                    rkey.extend_from_slice(pre_checked);
-                    rkey.extend_from_slice(&entry.keysuffix);
-
-                    let rkey_s = String::from_utf8(rkey.clone())
-                        .map_err(|_| de::Error::invalid_value(
-                            Unexpected::Bytes(&rkey),
-                            &"a valid utf-8 rkey",
-                        ))?;
-
-                    let key_depth = atproto_mst_depth(&rkey_s);
-                    if depth.is_none() {
-                        depth = Some(key_depth);
-                    } else if Some(key_depth) != depth {
-                        return Err(de::Error::invalid_value(
-                            Unexpected::Bytes(&prefix),
-                            &"all rkeys to have equal MST depth",
-                        ));
-                    }
-
-                    children.push(NodeThing {
-                        cid: entry.value,
-                        kind: ThingKind::Value { rkey: rkey_s },
-                    });
-
-                    if let Some(cid) = entry.tree {
-                        children.push(NodeThing {
-                            cid,
-                            kind: ThingKind::Tree,
-                        });
-                    }
-
-                    prefix = rkey;
-                }
-
-                Ok(Entries(children, depth))
-            }
-        }
-        deserializer.deserialize_seq(EntriesVisitor)
-    }
-}
-
 impl<'de> Deserialize<'de> for MstNode {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -158,7 +86,7 @@ impl<'de> Deserialize<'de> for MstNode {
                 let mut found_left = false;
                 let mut left = None;
                 let mut found_entries = false;
-                let mut things = Vec::with_capacity(4); // "fanout of 4" so does this make sense????
+                let mut things = Vec::new();
                 let mut depth = None;
 
                 while let Some(key) = map.next_key()? {
@@ -177,9 +105,51 @@ impl<'de> Deserialize<'de> for MstNode {
                                 return Err(de::Error::duplicate_field("e"));
                             }
                             found_entries = true;
-                            let Entries(mut child_entries, d) = map.next_value()?;
-                            things.append(&mut child_entries);
-                            depth = d;
+
+                            let mut prefix: Vec<u8> = vec![];
+
+                            for entry in map.next_value::<Vec<Entry>>()? {
+                                let mut rkey: Vec<u8> = vec![];
+                                let pre_checked = prefix
+                                    .get(..entry.prefix_len)
+                                    .ok_or_else(|| de::Error::invalid_value(
+                                        Unexpected::Bytes(&prefix),
+                                        &"a prefix at least as long as the prefix_len",
+                                    ))?;
+
+                                rkey.extend_from_slice(pre_checked);
+                                rkey.extend_from_slice(&entry.keysuffix);
+
+                                let rkey_s = String::from_utf8(rkey.clone())
+                                    .map_err(|_| de::Error::invalid_value(
+                                        Unexpected::Bytes(&rkey),
+                                        &"a valid utf-8 rkey",
+                                    ))?;
+
+                                let key_depth = atproto_mst_depth(&rkey_s);
+                                if depth.is_none() {
+                                    depth = Some(key_depth);
+                                } else if Some(key_depth) != depth {
+                                    return Err(de::Error::invalid_value(
+                                        Unexpected::Bytes(&prefix),
+                                        &"all rkeys to have equal MST depth",
+                                    ));
+                                }
+
+                                things.push(NodeThing {
+                                    cid: entry.value,
+                                    kind: ThingKind::Value { rkey: rkey_s },
+                                });
+
+                                if let Some(cid) = entry.tree {
+                                    things.push(NodeThing {
+                                        cid,
+                                        kind: ThingKind::Tree,
+                                    });
+                                }
+
+                                prefix = rkey;
+                            }
                         },
                         f => return Err(de::Error::unknown_field(f, NODE_FIELDS))
                     }
@@ -209,24 +179,6 @@ impl MstNode {
     pub(crate) fn is_empty(&self) -> bool {
         self.things.is_empty()
     }
-}
-
-/// MST node data schema
-#[derive(Debug, Deserialize, PartialEq)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct Node {
-    /// link to sub-tree Node on a lower level and with all keys sorting before
-    /// keys at this node
-    #[serde(rename = "l")]
-    pub left: Option<Cid>,
-    /// ordered list of TreeEntry objects
-    ///
-    /// atproto MSTs have a fanout of 4, so there can be max 4 entries.
-    #[serde(rename = "e")]
-    pub entries: Vec<Entry>, // maybe we can do [Option<Entry>; 4]?
-}
-
-impl Node {
     /// test if a block could possibly be a node
     ///
     /// we can't eagerly decode records except where we're *sure* they cannot be
@@ -252,16 +204,6 @@ impl Node {
                 .map(|b| b & 0b1110_0000 == 0x80)
                 .unwrap_or(false)
     }
-
-    // /// Check if a node has any entries
-    // ///
-    // /// An empty repository with no records is represented as a single MST node
-    // /// with an empty array of entries. This is the only situation in which a
-    // /// tree may contain an empty leaf node which does not either contain keys
-    // /// ("entries") or point to a sub-tree containing entries.
-    // pub(crate) fn is_empty(&self) -> bool {
-    //     self.left.is_none() && self.entries.is_empty()
-    // }
 }
 
 /// TreeEntry object

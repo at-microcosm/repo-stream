@@ -70,17 +70,6 @@ impl Walker {
         })
     }
 
-    fn next_todo(&mut self) -> Option<NodeThing> {
-        while let Some(last) = self.todo.last_mut() {
-            let Some(thing) = last.pop() else {
-                self.todo.pop();
-                continue;
-            };
-            return Some(thing);
-        }
-        None
-    }
-
     fn mpb_step(
         &mut self,
         kind: ThingKind,
@@ -140,18 +129,28 @@ impl Walker {
         }
     }
 
+    #[inline(always)]
+    fn next_todo(&mut self) -> Option<NodeThing> {
+        while let Some(last) = self.todo.last_mut() {
+            let Some(thing) = last.pop() else {
+                self.todo.pop();
+                continue;
+            };
+            return Some(thing);
+        }
+        None
+    }
+
     /// Advance through nodes until we find a record or can't go further
     pub fn step(
         &mut self,
         blocks: &mut HashMap<Cid, MaybeProcessedBlock>,
         process: impl Fn(Bytes) -> Bytes,
     ) -> Result<Option<Output>, WalkError> {
-
         while let Some(NodeThing { cid, kind }) = self.next_todo() {
             let Some(mpb) = blocks.get(&cid) else {
                 return Err(WalkError::MissingBlock(cid));
             };
-
             if let Some(out) = self.mpb_step(kind, cid, mpb, &process)? {
                 return Ok(Some(out));
             }
@@ -176,44 +175,4 @@ impl Walker {
         }
         Ok(None)
     }
-}
-
-#[cfg(test)]
-mod test {
-    use super::*;
-
-    // fn cid1() -> Cid {
-    //     "bafyreihixenvk3ahqbytas4hk4a26w43bh6eo3w6usjqtxkpzsvi655a3m"
-    //         .parse()
-    //         .unwrap()
-    // }
-
-    // #[test]
-    // fn test_push_empty_fails() {
-    //     let empty_node = Node {
-    //         left: None,
-    //         entries: vec![],
-    //     };
-    //     let mut stack = vec![];
-    //     let err = push_from_node(&mut stack, &empty_node, Depth::Depth(4));
-    //     assert_eq!(err, Err(MstError::EmptyNode));
-    // }
-
-    // #[test]
-    // fn test_push_one_node() {
-    //     let node = Node {
-    //         left: Some(cid1()),
-    //         entries: vec![],
-    //     };
-    //     let mut stack = vec![];
-    //     push_from_node(&mut stack, &node, Depth::Depth(4)).unwrap();
-    //     assert_eq!(
-    //         stack.last(),
-    //         Some(Need::Node {
-    //             depth: Depth::Depth(3),
-    //             cid: cid1()
-    //         })
-    //         .as_ref()
-    //     );
-    // }
 }

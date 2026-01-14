@@ -75,7 +75,7 @@ current car processing times (records processed into their length usize, phil's 
 - 5.0MiB: `6.8ms`
 - 279KiB: `170us`
 - 3.4KiB: `5.2us`
-- empty: `710ns`
+- empty: `670ns`
 
 it's a little faster with `mimalloc`
 

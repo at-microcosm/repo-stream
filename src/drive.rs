@@ -4,7 +4,7 @@ use crate::walk::Output;
 use crate::Bytes;
 use crate::HashMap;
 use crate::disk::{DiskError, DiskStore};
-use crate::mst::{Node, MstNode};
+use crate::mst::MstNode;
 use cid::Cid;
 use iroh_car::CarReader;
 use std::convert::Infallible;
@@ -65,7 +65,7 @@ pub(crate) enum MaybeProcessedBlock {
 
 impl MaybeProcessedBlock {
     pub(crate) fn maybe(process: fn(Bytes) -> Bytes, data: Bytes) -> Self {
-        if Node::could_be(&data) {
+        if MstNode::could_be(&data) {
             MaybeProcessedBlock::Raw(data)
         } else {
             MaybeProcessedBlock::Processed(process(data))
