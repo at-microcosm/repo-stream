@@ -4,6 +4,10 @@ use std::path::{Path, PathBuf};
 
 use criterion::{Criterion, criterion_group, criterion_main};
 
+// use mimalloc::MiMalloc;
+// #[global_allocator]
+// static GLOBAL: MiMalloc = MiMalloc;
+
 pub fn criterion_benchmark(c: &mut Criterion) {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
