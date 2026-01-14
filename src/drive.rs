@@ -376,7 +376,7 @@ impl<R: AsyncRead + Unpin> NeedDisk<R> {
                 let maybe_processed = MaybeProcessedBlock::maybe(self.process, data);
                 mem_size += maybe_processed.len();
                 chunk.push((cid, maybe_processed));
-                if mem_size >= self.max_size {
+                if mem_size >= (self.max_size / 2) {
                     // soooooo if we're setting the db cache to max_size and then letting
                     // multiple chunks in the queue that are >= max_size, then at any time
                     // we might be using some multiple of max_size?

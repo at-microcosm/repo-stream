@@ -5,7 +5,6 @@ Read a CAR file by spilling to disk
 extern crate repo_stream;
 
 use mimalloc::MiMalloc;
-
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
 
@@ -58,6 +57,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // at this point you might want to fetch the account's signing key
             // via the DID from the commit, and then verify the signature.
             log::warn!("big's comit ({:?}): {:?}", t0.elapsed(), commit);
+
+            // log::info!("now is good time to check mem usage...");
+            // tokio::time::sleep(std::time::Duration::from_secs(15)).await;
 
             // pop the driver back out to get some code indentation relief
             driver
