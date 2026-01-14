@@ -1,16 +1,17 @@
 //! Consume a CAR from an AsyncRead, producing an ordered stream of records
 
+use crate::walk::Output;
 use crate::Bytes;
 use crate::HashMap;
 use crate::disk::{DiskError, DiskStore};
-use crate::mst::Node;
+use crate::mst::{Node, MstNode};
 use cid::Cid;
 use iroh_car::CarReader;
 use std::convert::Infallible;
 use tokio::{io::AsyncRead, sync::mpsc};
 
 use crate::mst::Commit;
-use crate::walk::{Step, WalkError, Walker};
+use crate::walk::{WalkError, Walker};
 
 /// Errors that can happen while consuming and emitting blocks and records
 #[derive(Debug, thiserror::Error)]
@@ -157,7 +158,10 @@ impl DriverBuilder {
         }
     }
     /// Begin processing an atproto MST from a CAR file
-    pub async fn load_car<R: AsyncRead + Unpin>(&self, reader: R) -> Result<Driver<R>, DriveError> {
+    pub async fn load_car<R: AsyncRead + Unpin>(
+        &self,
+        reader: R,
+    ) -> Result<Option<Driver<R>>, DriveError> {
         Driver::load_car(reader, noop, self.mem_limit_mb).await
     }
 }
@@ -180,7 +184,10 @@ impl DriverBuilderWithProcessor {
         self
     }
     /// Begin processing an atproto MST from a CAR file
-    pub async fn load_car<R: AsyncRead + Unpin>(&self, reader: R) -> Result<Driver<R>, DriveError> {
+    pub async fn load_car<R: AsyncRead + Unpin>(
+        &self,
+        reader: R,
+    ) -> Result<Option<Driver<R>>, DriveError> {
         Driver::load_car(reader, self.block_processor, self.mem_limit_mb).await
     }
 }
@@ -199,7 +206,7 @@ impl<R: AsyncRead + Unpin> Driver<R> {
         reader: R,
         process: fn(Bytes) -> Bytes,
         mem_limit_mb: usize,
-    ) -> Result<Driver<R>, DriveError> {
+    ) -> Result<Option<Driver<R>>, DriveError> {
         let max_size = mem_limit_mb * 2_usize.pow(20);
         let mut mem_blocks = HashMap::new();
 
@@ -225,8 +232,6 @@ impl<R: AsyncRead + Unpin> Driver<R> {
                 continue;
             }
 
-            let data = Bytes::from(data);
-
             // remaining possible types: node, record, other. optimistically process
             let maybe_processed = MaybeProcessedBlock::maybe(process, data);
 
@@ -234,30 +239,41 @@ impl<R: AsyncRead + Unpin> Driver<R> {
             mem_size += maybe_processed.len();
             mem_blocks.insert(cid, maybe_processed);
             if mem_size >= max_size {
-                return Ok(Driver::Disk(NeedDisk {
+                return Ok(Some(Driver::Disk(NeedDisk {
                     car,
                     root,
                     process,
                     max_size,
                     mem_blocks,
                     commit,
-                }));
+                })));
             }
         }
 
         // all blocks loaded and we fit in memory! hopefully we found the commit...
         let commit = commit.ok_or(DriveError::MissingCommit)?;
 
-        let walker = Walker::new(commit.data);
+        // the commit always must point to a Node; empty node => empty MST special case
+        let node: MstNode = match mem_blocks.get(&commit.data).ok_or(DriveError::MissingCommit)? {
+            MaybeProcessedBlock::Processed(_) => Err(WalkError::BadCommitFingerprint)?,
+            MaybeProcessedBlock::Raw(bytes) => serde_ipld_dagcbor::from_slice(bytes)?,
+        };
+        if node.is_empty() {
+            // TODO: actually we still want the commit in this case
+            return Ok(None);
+        }
+        let depth = node.depth.unwrap();
 
-        Ok(Driver::Memory(
+        let walker = Walker::new(commit.data, depth);
+
+        Ok(Some(Driver::Memory(
             commit,
             MemDriver {
                 blocks: mem_blocks,
                 walker,
                 process,
             },
-        ))
+        )))
     }
 }
 
@@ -287,15 +303,11 @@ impl MemDriver {
         let mut out = Vec::with_capacity(n);
         for _ in 0..n {
             // walk as far as we can until we run out of blocks or find a record
-            match self.walker.step(&mut self.blocks, self.process)? {
-                Step::Finish => break,
-                Step::Found { rkey, data } => {
-                    out.push((rkey, data));
-                    continue;
-                }
+            let Some(Output { rkey, cid: _, data }) = self.walker.step(&mut self.blocks, self.process)? else {
+                break;
             };
+            out.push((rkey, data));
         }
-
         if out.is_empty() {
             Ok(None)
         } else {
@@ -318,7 +330,7 @@ impl<R: AsyncRead + Unpin> NeedDisk<R> {
     pub async fn finish_loading(
         mut self,
         mut store: DiskStore,
-    ) -> Result<(Commit, DiskDriver), DriveError> {
+    ) -> Result<(Commit, Option<DiskDriver>), DriveError> {
         // move store in and back out so we can manage lifetimes
         // dump mem blocks into the store
         store = tokio::task::spawn(async move {
@@ -390,14 +402,29 @@ impl<R: AsyncRead + Unpin> NeedDisk<R> {
 
         let commit = self.commit.ok_or(DriveError::MissingCommit)?;
 
-        let walker = Walker::new(commit.data);
+        // the commit always must point to a Node; empty node => empty MST special case
+        let db_bytes = store
+            .get(&commit.data.to_bytes())
+            .map_err(|e| DriveError::StorageError(DiskError::DbError(e)))?
+            .ok_or(DriveError::MissingCommit)?;
+
+        let node: MstNode = match MaybeProcessedBlock::from_bytes(db_bytes.to_vec()) {
+            MaybeProcessedBlock::Processed(_) => Err(WalkError::BadCommitFingerprint)?,
+            MaybeProcessedBlock::Raw(bytes) => serde_ipld_dagcbor::from_slice(&bytes)?,
+        };
+        if node.is_empty() {
+            return Ok((commit, None));
+        }
+        let depth = node.depth.unwrap();
+
+        let walker = Walker::new(commit.data, depth);
 
         Ok((
             commit,
-            DiskDriver {
+            Some(DiskDriver {
                 process: self.process,
                 state: Some(BigState { store, walker }),
-            },
+            }),
         ))
     }
 }
@@ -459,10 +486,10 @@ impl DiskDriver {
                             return (state, Err(e.into()));
                         }
                     };
-                    match step {
-                        Step::Finish => break,
-                        Step::Found { rkey, data } => out.push((rkey, data)),
+                    let Some(Output { rkey, cid: _, data }) = step else {
+                        break;
                     };
+                    out.push((rkey, data));
                 }
 
                 (state, Ok::<_, DriveError>(out))
@@ -499,13 +526,10 @@ impl DiskDriver {
                     Err(e) => return tx.blocking_send(Err(e.into())),
                 };
 
-                match step {
-                    Step::Finish => return Ok(()),
-                    Step::Found { rkey, data } => {
-                        out.push((rkey, data));
-                        continue;
-                    }
+                let Some(Output { rkey, cid: _, data }) = step else {
+                    break;
                 };
+                out.push((rkey, data));
             }
 
             if out.is_empty() {

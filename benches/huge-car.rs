@@ -26,6 +26,7 @@ async fn drive_car(filename: impl AsRef<Path>) -> usize {
         match Driver::load_car(reader, |block| block.len().to_le_bytes().to_vec(), 1024)
             .await
             .unwrap()
+            .unwrap()
         {
             Driver::Memory(_, mem_driver) => mem_driver,
             Driver::Disk(_) => panic!("not doing disk for benchmark"),
