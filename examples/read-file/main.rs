@@ -23,22 +23,23 @@ async fn main() -> Result<()> {
     let reader = tokio::fs::File::open(file).await?;
     let reader = tokio::io::BufReader::new(reader);
 
-    let (commit, mut driver) = match DriverBuilder::new()
+    let (commit, driver) = match DriverBuilder::new()
         .with_block_processor(|block| block.len().to_ne_bytes().to_vec())
         .load_car(reader)
         .await?
     {
-        None => todo!(),
-        Some(Driver::Memory(commit, mem_driver)) => (commit, mem_driver),
-        Some(Driver::Disk(_)) => panic!("this example doesn't handle big CARs"),
+        Driver::Memory(commit, mem_driver) => (commit, mem_driver),
+        Driver::Disk(_) => panic!("this example doesn't handle big CARs"),
     };
 
     log::info!("got commit: {commit:?}");
 
     let mut n = 0;
-    while let Some(pairs) = driver.next_chunk(256).await? {
-        n += pairs.len();
-        // log::info!("got {rkey:?}");
+    if let Some(mut driver) = driver {
+        while let Some(pairs) = driver.next_chunk(256).await? {
+            n += pairs.len();
+            // log::info!("got {rkey:?}");
+        }
     }
     log::info!("bye! total records={n}");
 

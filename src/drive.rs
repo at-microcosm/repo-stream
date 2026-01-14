@@ -107,7 +107,7 @@ pub enum Driver<R: AsyncRead + Unpin> {
     ///
     /// You probably want to check the commit's signature. You can go ahead and
     /// walk the MST right away.
-    Memory(Commit, MemDriver),
+    Memory(Commit, Option<MemDriver>),
     /// Blocks exceed the memory limit
     ///
     /// You'll need to provide a disk storage to continue. The commit will be
@@ -159,10 +159,7 @@ impl DriverBuilder {
         }
     }
     /// Begin processing an atproto MST from a CAR file
-    pub async fn load_car<R: AsyncRead + Unpin>(
-        &self,
-        reader: R,
-    ) -> Result<Option<Driver<R>>, DriveError> {
+    pub async fn load_car<R: AsyncRead + Unpin>(&self, reader: R) -> Result<Driver<R>, DriveError> {
         Driver::load_car(reader, noop, self.mem_limit_mb).await
     }
 }
@@ -185,10 +182,7 @@ impl DriverBuilderWithProcessor {
         self
     }
     /// Begin processing an atproto MST from a CAR file
-    pub async fn load_car<R: AsyncRead + Unpin>(
-        &self,
-        reader: R,
-    ) -> Result<Option<Driver<R>>, DriveError> {
+    pub async fn load_car<R: AsyncRead + Unpin>(&self, reader: R) -> Result<Driver<R>, DriveError> {
         Driver::load_car(reader, self.block_processor, self.mem_limit_mb).await
     }
 }
@@ -207,7 +201,7 @@ impl<R: AsyncRead + Unpin> Driver<R> {
         reader: R,
         process: fn(Bytes) -> Bytes,
         mem_limit_mb: usize,
-    ) -> Result<Option<Driver<R>>, DriveError> {
+    ) -> Result<Driver<R>, DriveError> {
         let max_size = mem_limit_mb * 2_usize.pow(20);
         let mut mem_blocks = HashMap::new();
 
@@ -240,14 +234,14 @@ impl<R: AsyncRead + Unpin> Driver<R> {
             mem_size += maybe_processed.len();
             mem_blocks.insert(cid, maybe_processed);
             if mem_size >= max_size {
-                return Ok(Some(Driver::Disk(NeedDisk {
+                return Ok(Driver::Disk(NeedDisk {
                     car,
                     root,
                     process,
                     max_size,
                     mem_blocks,
                     commit,
-                })));
+                }));
             }
         }
 
@@ -264,17 +258,17 @@ impl<R: AsyncRead + Unpin> Driver<R> {
         };
         let Some(walker) = Walker::new(root_node) else {
             // TODO: actually we still want the commit in this case
-            return Ok(None);
+            return Ok(Driver::Memory(commit, None));
         };
 
-        Ok(Some(Driver::Memory(
+        Ok(Driver::Memory(
             commit,
-            MemDriver {
+            Some(MemDriver {
                 blocks: mem_blocks,
                 walker,
                 process,
-            },
-        )))
+            }),
+        ))
     }
 }
 
