@@ -1,13 +1,7 @@
 //! Depth-first MST traversal
 
-use crate::mst::NodeThing;
-use crate::mst::ThingKind;
-use crate::mst::MstNode;
-use crate::mst::Depth;
-use crate::Bytes;
-use crate::HashMap;
-use crate::disk::DiskStore;
-use crate::drive::MaybeProcessedBlock;
+use crate::mst::{Depth, MstNode, NodeThing, ThingKind};
+use crate::{Bytes, HashMap, disk::DiskStore, drive::MaybeProcessedBlock};
 use cid::Cid;
 use std::convert::Infallible;
 
@@ -60,9 +54,7 @@ pub struct Walker {
 }
 
 impl Walker {
-    pub fn new(
-        root_node: MstNode,
-    ) -> Option<Self> {
+    pub fn new(root_node: MstNode) -> Option<Self> {
         Some(Self {
             prev_rkey: "".to_string(),
             root_depth: root_node.depth?,
@@ -93,33 +85,31 @@ impl Walker {
                 self.prev_rkey = rkey.clone();
 
                 log::trace!("val @ {rkey}");
-                Ok(Some(Output {
-                    rkey,
-                    cid,
-                    data,
-                }))
+                Ok(Some(Output { rkey, cid, data }))
             }
             ThingKind::Tree => {
                 let MaybeProcessedBlock::Raw(data) = mpb else {
                     return Err(WalkError::BadCommitFingerprint);
                 };
 
-                let node: MstNode = serde_ipld_dagcbor::from_slice(&data)
-                    .map_err(WalkError::BadCommit)?;
+                let node: MstNode =
+                    serde_ipld_dagcbor::from_slice(data).map_err(WalkError::BadCommit)?;
 
                 if node.is_empty() {
                     return Err(WalkError::MstError(MstError::EmptyNode));
                 }
 
                 let current_depth = self.root_depth - (self.todo.len() - 1) as u32;
-                let next_depth = current_depth.checked_sub(1).ok_or(MstError::DepthUnderflow)?;
-                if let Some(d) = node.depth {
-                    if d != next_depth {
-                        return Err(WalkError::MstError(MstError::WrongDepth {
-                            depth: d,
-                            expected: next_depth,
-                        }));
-                    }
+                let next_depth = current_depth
+                    .checked_sub(1)
+                    .ok_or(MstError::DepthUnderflow)?;
+                if let Some(d) = node.depth
+                    && d != next_depth
+                {
+                    return Err(WalkError::MstError(MstError::WrongDepth {
+                        depth: d,
+                        expected: next_depth,
+                    }));
                 }
 
                 log::trace!("node into depth {next_depth}");

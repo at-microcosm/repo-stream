@@ -17,8 +17,7 @@ let store = DiskBuilder::new()
 ```
 */
 
-use crate::Bytes;
-use crate::drive::DriveError;
+use crate::{Bytes, drive::DriveError};
 use fjall::{Database, Error as FjallError, Keyspace, KeyspaceCreateOptions};
 use std::path::PathBuf;
 

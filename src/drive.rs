@@ -1,10 +1,11 @@
 //! Consume a CAR from an AsyncRead, producing an ordered stream of records
 
-use crate::walk::Output;
-use crate::Bytes;
-use crate::HashMap;
-use crate::disk::{DiskError, DiskStore};
-use crate::mst::MstNode;
+use crate::{
+    Bytes, HashMap,
+    disk::{DiskError, DiskStore},
+    mst::MstNode,
+    walk::Output,
+};
 use cid::Cid;
 use iroh_car::CarReader;
 use std::convert::Infallible;
@@ -254,7 +255,10 @@ impl<R: AsyncRead + Unpin> Driver<R> {
         let commit = commit.ok_or(DriveError::MissingCommit)?;
 
         // the commit always must point to a Node; empty node => empty MST special case
-        let root_node: MstNode = match mem_blocks.get(&commit.data).ok_or(DriveError::MissingCommit)? {
+        let root_node: MstNode = match mem_blocks
+            .get(&commit.data)
+            .ok_or(DriveError::MissingCommit)?
+        {
             MaybeProcessedBlock::Processed(_) => Err(WalkError::BadCommitFingerprint)?,
             MaybeProcessedBlock::Raw(bytes) => serde_ipld_dagcbor::from_slice(bytes)?,
         };
@@ -300,7 +304,9 @@ impl MemDriver {
         let mut out = Vec::with_capacity(n);
         for _ in 0..n {
             // walk as far as we can until we run out of blocks or find a record
-            let Some(Output { rkey, cid: _, data }) = self.walker.step(&mut self.blocks, self.process)? else {
+            let Some(Output { rkey, cid: _, data }) =
+                self.walker.step(&mut self.blocks, self.process)?
+            else {
                 break;
             };
             out.push((rkey, data));
