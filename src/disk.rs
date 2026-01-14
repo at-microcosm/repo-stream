@@ -19,8 +19,7 @@ let store = DiskBuilder::new()
 
 use crate::Bytes;
 use crate::drive::DriveError;
-use fjall::config::{CompressionPolicy, PinningPolicy, RestartIntervalPolicy};
-use fjall::{CompressionType, Database, Error as FjallError, Keyspace, KeyspaceCreateOptions};
+use fjall::{Database, Error as FjallError, Keyspace, KeyspaceCreateOptions};
 use std::path::PathBuf;
 
 #[derive(Debug, thiserror::Error)]
@@ -111,20 +110,14 @@ impl DiskStore {
         let max_stored = max_stored_mb * 2_usize.pow(20);
         let (db, partition) = tokio::task::spawn_blocking(move || {
             let db = Database::builder(path)
-                // .manual_journal_persist(true)
-                // .flush_workers(1)
-                // .compaction_workers(1)
-                .journal_compression(CompressionType::None)
-                .cache_size(cache_mb as u64 * 2_u64.pow(20))
+                .manual_journal_persist(true)
+                .worker_threads(1)
+                .cache_size(cache_mb as u64 * 2_u64.pow(20) / 2)
                 .temporary(true)
                 .open()?;
             let opts = KeyspaceCreateOptions::default()
-                .data_block_restart_interval_policy(RestartIntervalPolicy::all(8))
-                .filter_block_pinning_policy(PinningPolicy::disabled())
                 .expect_point_read_hits(true)
-                .data_block_compression_policy(CompressionPolicy::disabled())
-                .manual_journal_persist(true)
-                .max_memtable_size(32 * 2_u64.pow(20));
+                .max_memtable_size(16 * 2_u64.pow(20));
             let partition = db.keyspace("z", || opts)?;
 
             Ok::<_, DiskError>((db, partition))
