@@ -42,9 +42,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .load_car(reader)
         .await?
     {
-        None => panic!("empty mst! try a bigger car"),
-        Some(Driver::Memory(_, _)) => panic!("try this on a bigger car"),
-        Some(Driver::Disk(big_stuff)) => {
+        Driver::Memory(_, _) => panic!("try this on a bigger car"),
+        Driver::Disk(big_stuff) => {
             // we reach here if the repo was too big and needs to be spilled to
             // disk to continue
 
