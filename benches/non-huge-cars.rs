@@ -32,8 +32,14 @@ pub fn criterion_benchmark(c: &mut Criterion) {
     });
 }
 
+#[inline(always)]
+fn ser(block: Vec<u8>) -> Vec<u8> {
+    let s = block.len();
+    usize::to_ne_bytes(s).to_vec()
+}
+
 async fn drive_car(bytes: &[u8]) -> usize {
-    let mut driver = match Driver::load_car(bytes, |block| block.len().to_le_bytes().to_vec(), 32)
+    let mut driver = match Driver::load_car(bytes, ser, 32)
         .await
         .unwrap()
     {
