@@ -254,17 +254,14 @@ impl<R: AsyncRead + Unpin> Driver<R> {
         let commit = commit.ok_or(DriveError::MissingCommit)?;
 
         // the commit always must point to a Node; empty node => empty MST special case
-        let node: MstNode = match mem_blocks.get(&commit.data).ok_or(DriveError::MissingCommit)? {
+        let root_node: MstNode = match mem_blocks.get(&commit.data).ok_or(DriveError::MissingCommit)? {
             MaybeProcessedBlock::Processed(_) => Err(WalkError::BadCommitFingerprint)?,
             MaybeProcessedBlock::Raw(bytes) => serde_ipld_dagcbor::from_slice(bytes)?,
         };
-        if node.is_empty() {
+        let Some(walker) = Walker::new(root_node) else {
             // TODO: actually we still want the commit in this case
             return Ok(None);
-        }
-        let depth = node.depth.unwrap();
-
-        let walker = Walker::new(commit.data, depth);
+        };
 
         Ok(Some(Driver::Memory(
             commit,
@@ -412,12 +409,9 @@ impl<R: AsyncRead + Unpin> NeedDisk<R> {
             MaybeProcessedBlock::Processed(_) => Err(WalkError::BadCommitFingerprint)?,
             MaybeProcessedBlock::Raw(bytes) => serde_ipld_dagcbor::from_slice(&bytes)?,
         };
-        if node.is_empty() {
+        let Some(walker) = Walker::new(node) else {
             return Ok((commit, None));
-        }
-        let depth = node.depth.unwrap();
-
-        let walker = Walker::new(commit.data, depth);
+        };
 
         Ok((
             commit,

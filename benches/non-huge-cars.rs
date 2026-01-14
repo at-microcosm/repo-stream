@@ -3,6 +3,10 @@ use repo_stream::Driver;
 
 use criterion::{Criterion, criterion_group, criterion_main};
 
+// use mimalloc::MiMalloc;
+// #[global_allocator]
+// static GLOBAL: MiMalloc = MiMalloc;
+
 const EMPTY_CAR: &'static [u8] = include_bytes!("../car-samples/empty.car");
 const TINY_CAR: &'static [u8] = include_bytes!("../car-samples/tiny.car");
 const LITTLE_CAR: &'static [u8] = include_bytes!("../car-samples/little.car");

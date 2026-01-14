@@ -55,30 +55,34 @@ pub struct Output {
 #[derive(Debug)]
 pub struct Walker {
     prev_rkey: String,
-    todo: Vec<(Depth, NodeThing)>,
+    root_depth: Depth,
+    todo: Vec<Vec<NodeThing>>,
 }
 
 impl Walker {
     pub fn new(
-        root_cid: Cid,
-        depth: Depth,
-    ) -> Self {
-        Self {
+        root_node: MstNode,
+    ) -> Option<Self> {
+        Some(Self {
             prev_rkey: "".to_string(),
-            todo: vec![(
-                depth + 1, // we're kind of inventing a fake root one above the real root
-                // ... maybe we should just pass in the real root here???
-                NodeThing {
-                    cid: root_cid,
-                    kind: ThingKind::Tree,
-                },
-            )],
+            root_depth: root_node.depth?,
+            todo: vec![root_node.things],
+        })
+    }
+
+    fn next_todo(&mut self) -> Option<NodeThing> {
+        while let Some(last) = self.todo.last_mut() {
+            let Some(thing) = last.pop() else {
+                self.todo.pop();
+                continue;
+            };
+            return Some(thing);
         }
+        None
     }
 
     fn mpb_step(
         &mut self,
-        depth: Depth,
         kind: ThingKind,
         cid: Cid,
         mpb: &MaybeProcessedBlock,
@@ -99,6 +103,7 @@ impl Walker {
                 }
                 self.prev_rkey = rkey.clone();
 
+                log::trace!("val @ {rkey}");
                 Ok(Some(Output {
                     rkey,
                     cid,
@@ -117,7 +122,8 @@ impl Walker {
                     return Err(WalkError::MstError(MstError::EmptyNode));
                 }
 
-                let next_depth = depth.checked_sub(1).ok_or(MstError::DepthUnderflow)?;
+                let current_depth = self.root_depth - (self.todo.len() - 1) as u32;
+                let next_depth = current_depth.checked_sub(1).ok_or(MstError::DepthUnderflow)?;
                 if let Some(d) = node.depth {
                     if d != next_depth {
                         return Err(WalkError::MstError(MstError::WrongDepth {
@@ -127,10 +133,8 @@ impl Walker {
                     }
                 }
 
-                for thing in node.things {
-                    self.todo.push((next_depth, thing));
-                }
-
+                log::trace!("node into depth {next_depth}");
+                self.todo.push(node.things);
                 Ok(None)
             }
         }
@@ -143,16 +147,15 @@ impl Walker {
         process: impl Fn(Bytes) -> Bytes,
     ) -> Result<Option<Output>, WalkError> {
 
-        while let Some((depth, NodeThing { cid, kind })) = self.todo.pop() {
+        while let Some(NodeThing { cid, kind }) = self.next_todo() {
             let Some(mpb) = blocks.get(&cid) else {
                 return Err(WalkError::MissingBlock(cid));
             };
-            if let Some(out) = self.mpb_step(depth, kind, cid, mpb, &process)? {
+
+            if let Some(out) = self.mpb_step(kind, cid, mpb, &process)? {
                 return Ok(Some(out));
             }
         }
-
-        log::trace!("tried to walk but we're actually done.");
         Ok(None)
     }
 
@@ -162,17 +165,15 @@ impl Walker {
         blocks: &mut DiskStore,
         process: impl Fn(Bytes) -> Bytes,
     ) -> Result<Option<Output>, WalkError> {
-
-        while let Some((depth, NodeThing { cid, kind })) = self.todo.pop() {
+        while let Some(NodeThing { cid, kind }) = self.next_todo() {
             let Some(block_slice) = blocks.get(&cid.to_bytes())? else {
                 return Err(WalkError::MissingBlock(cid));
             };
             let mpb = MaybeProcessedBlock::from_bytes(block_slice.to_vec());
-            if let Some(out) = self.mpb_step(depth, kind, cid, &mpb, &process)? {
+            if let Some(out) = self.mpb_step(kind, cid, &mpb, &process)? {
                 return Ok(Some(out));
             }
         }
-        log::trace!("tried to walk but we're actually done.");
         Ok(None)
     }
 }

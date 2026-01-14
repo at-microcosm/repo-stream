@@ -58,8 +58,9 @@ async fn main() -> Result<(), DriveError> {
 ```
 
 more recent todo
-
-- [ ] get an *emtpy* car for the test suite
+- [ ] repo car slices
+- [ ] lazy-value stream (rkey -> CID diffing for tap-like `#sync` handling)
+- [x] get an *emtpy* car for the test suite
 - [x] implement a max size on disk limit
 
 
@@ -70,10 +71,25 @@ older stuff (to clean up):
 
 current car processing times (records processed into their length usize, phil's dev machine):
 
-- 128MiB CAR file: `347ms`
-- 5.0MiB: `6.1ms`
-- 279KiB: `139us`
-- 3.4KiB: `4.9us`
+- 128MiB CAR file: `350ms`
+- 5.0MiB: `6.8ms`
+- 279KiB: `170us`
+- 3.4KiB: `5.2us`
+- empty: `710ns`
+
+it's a little faster with `mimalloc`
+
+```rust
+use mimalloc::MiMalloc;
+#[global_allocator]
+static GLOBAL: MiMalloc = MiMalloc;
+```
+
+- 128MiB CAR file: `310ms` (-13%)
+- 5.0MiB: `6.1ms` (-10%)
+- 279KiB: `160us` (-5%)
+- 3.4KiB: `5.7us` (-9%)
+- empty: `660ns` (-7%)
 
 
 running the huge-car benchmark
