@@ -115,22 +115,26 @@ pub enum Driver<R: AsyncRead + Unpin> {
     Disk(NeedDisk<R>),
 }
 
-/// Builder-style driver setup
-#[derive(Debug, Clone)]
-pub struct DriverBuilder {
-    pub mem_limit_mb: usize,
-}
-
-impl Default for DriverBuilder {
-    fn default() -> Self {
-        Self { mem_limit_mb: 16 }
-    }
-}
-
 /// Processor that just returns the raw blocks
 #[inline]
 pub fn noop(block: Bytes) -> Bytes {
     block
+}
+
+/// Builder-style driver setup
+#[derive(Debug, Clone)]
+pub struct DriverBuilder {
+    pub mem_limit_mb: usize,
+    pub block_processor: fn(Bytes) -> Bytes,
+}
+
+impl Default for DriverBuilder {
+    fn default() -> Self {
+        Self {
+            mem_limit_mb: 16,
+            block_processor: noop,
+        }
+    }
 }
 
 impl DriverBuilder {
@@ -141,46 +145,19 @@ impl DriverBuilder {
     /// Set the in-memory size limit, in MiB
     ///
     /// Default: 16 MiB
-    pub fn with_mem_limit_mb(self, new_limit: usize) -> Self {
-        Self {
-            mem_limit_mb: new_limit,
-        }
-    }
-    /// Set the block processor
-    ///
-    /// Default: noop, raw blocks will be emitted
-    pub fn with_block_processor(
-        self,
-        block_processor: fn(Bytes) -> Bytes,
-    ) -> DriverBuilderWithProcessor {
-        DriverBuilderWithProcessor {
-            mem_limit_mb: self.mem_limit_mb,
-            block_processor,
-        }
-    }
-    /// Begin processing an atproto MST from a CAR file
-    pub async fn load_car<R: AsyncRead + Unpin>(&self, reader: R) -> Result<Driver<R>, DriveError> {
-        Driver::load_car(reader, noop, self.mem_limit_mb).await
-    }
-}
-
-/// Builder-style driver intermediate step
-///
-/// start from `DriverBuilder`
-#[derive(Debug, Clone)]
-pub struct DriverBuilderWithProcessor {
-    pub mem_limit_mb: usize,
-    pub block_processor: fn(Bytes) -> Bytes,
-}
-
-impl DriverBuilderWithProcessor {
-    /// Set the in-memory size limit, in MiB
-    ///
-    /// Default: 16 MiB
     pub fn with_mem_limit_mb(mut self, new_limit: usize) -> Self {
         self.mem_limit_mb = new_limit;
         self
     }
+
+    /// Set the block processor
+    ///
+    /// Default: noop, raw blocks will be emitted
+    pub fn with_block_processor(mut self, new_processor: fn(Bytes) -> Bytes) -> DriverBuilder {
+        self.block_processor = new_processor;
+        self
+    }
+
     /// Begin processing an atproto MST from a CAR file
     pub async fn load_car<R: AsyncRead + Unpin>(&self, reader: R) -> Result<Driver<R>, DriveError> {
         Driver::load_car(reader, self.block_processor, self.mem_limit_mb).await
