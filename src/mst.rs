@@ -55,13 +55,13 @@ pub(crate) struct MstNode {
     pub things: Vec<NodeThing>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct NodeThing {
     pub(crate) cid: Cid,
     pub(crate) kind: ThingKind,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) enum ThingKind {
     Tree,
     Value { rkey: Rkey },

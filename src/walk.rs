@@ -1,7 +1,7 @@
 //! Depth-first MST traversal
 
 use crate::mst::{Depth, MstNode, NodeThing, ThingKind};
-use crate::{Bytes, HashMap, Rkey, disk::DiskStore, drive::MaybeProcessedBlock};
+use crate::{Bytes, HashMap, Rkey, noop, disk::DiskStore, drive::MaybeProcessedBlock};
 use cid::Cid;
 use std::convert::Infallible;
 
@@ -50,7 +50,7 @@ pub enum Step<T = Output> {
 /// Traverser of an atproto MST
 ///
 /// Walks the tree from left-to-right in depth-first order
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Walker {
     prev_rkey: Rkey,
     root_depth: Depth,
@@ -150,6 +150,49 @@ impl Walker {
             }
         }
         Ok(Step::End(None))
+    }
+
+    pub fn step_to_slice_edge(
+        &mut self,
+        blocks: &mut HashMap<Cid, MaybeProcessedBlock>,
+    ) -> Result<Option<Rkey>, WalkError> {
+        let mut ant = self.clone();
+        let mut ant_prev;
+        let mut rkey_prev = None;
+
+        loop {
+            ant_prev = ant.clone();
+            ant = ant.clone();
+
+            let Some(NodeThing { cid, kind }) = ant.next_todo() else {
+                return Ok(None);
+            };
+
+            let maybe_mpb = blocks.get(&cid);
+
+            match (&kind, maybe_mpb) {
+                (ThingKind::Value { rkey: _ }, Some(_)) => {
+                    // oops we took a step too far
+                    *self = ant_prev;
+                    return Ok(rkey_prev);
+                }
+                (ThingKind::Value { rkey }, None) => {
+                    if let Some(p) = rkey_prev && *rkey <= p {
+                        return Err(WalkError::MstError(MstError::RkeyOutOfOrder {
+                            rkey: rkey.clone(),
+                            prev: p,
+                        }));
+                    }
+                    rkey_prev = Some(rkey.clone());
+                }
+                (ThingKind::Tree, Some(mpb)) => {
+                    ant.mpb_step(kind, cid, mpb, noop)?;
+                }
+                (ThingKind::Tree, None) => {
+                    return Err(WalkError::MissingBlock(cid));
+                }
+            }
+        }
     }
 
     /// blocking!!!!!!
