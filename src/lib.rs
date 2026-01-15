@@ -90,6 +90,8 @@ pub use walk::Output;
 
 pub type Bytes = Vec<u8>;
 
+pub type Rkey = String;
+
 pub(crate) use hashbrown::HashMap;
 
 #[doc = include_str!("../readme.md")]

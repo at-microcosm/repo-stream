@@ -3,6 +3,7 @@
 //! The primary aim is to work through the **tree** structure. Non-node blocks
 //! are left as raw bytes, for upper levels to parse into DAG-CBOR or whatever.
 
+use crate::Rkey;
 use cid::Cid;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -63,7 +64,7 @@ pub(crate) struct NodeThing {
 #[derive(Debug)]
 pub(crate) enum ThingKind {
     Tree,
-    Value { rkey: String },
+    Value { rkey: Rkey },
 }
 
 impl<'de> Deserialize<'de> for MstNode {

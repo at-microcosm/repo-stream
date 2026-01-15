@@ -1,7 +1,7 @@
 //! Depth-first MST traversal
 
 use crate::mst::{Depth, MstNode, NodeThing, ThingKind};
-use crate::{Bytes, HashMap, disk::DiskStore, drive::MaybeProcessedBlock};
+use crate::{Bytes, HashMap, Rkey, disk::DiskStore, drive::MaybeProcessedBlock};
 use cid::Cid;
 use std::convert::Infallible;
 
@@ -30,13 +30,13 @@ pub enum MstError {
     #[error("MST depth underflow: depth-0 node with child trees")]
     DepthUnderflow,
     #[error("Encountered rkey {rkey:?} which cannot follow the previous: {prev:?}")]
-    RkeyOutOfOrder { prev: String, rkey: String },
+    RkeyOutOfOrder { prev: Rkey, rkey: Rkey },
 }
 
 /// Walker outputs
 #[derive(Debug, PartialEq)]
 pub struct Output {
-    pub rkey: String,
+    pub rkey: Rkey,
     pub cid: Cid,
     pub data: Bytes,
 }
@@ -46,7 +46,7 @@ pub struct Output {
 /// Walks the tree from left-to-right in depth-first order
 #[derive(Debug)]
 pub struct Walker {
-    prev_rkey: String,
+    prev_rkey: Rkey,
     root_depth: Depth,
     todo: Vec<Vec<NodeThing>>,
 }
