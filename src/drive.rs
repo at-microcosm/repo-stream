@@ -1,7 +1,7 @@
 //! Consume a CAR from an AsyncRead, producing an ordered stream of records
 
 use crate::{
-    Bytes, HashMap,
+    Bytes, HashMap, Rkey, Step,
     disk::{DiskError, DiskStore},
     mst::MstNode,
     walk::Output,
@@ -107,7 +107,7 @@ pub enum Driver<R: AsyncRead + Unpin> {
     ///
     /// You probably want to check the commit's signature. You can go ahead and
     /// walk the MST right away.
-    Memory(Commit, MemDriver),
+    Memory(Commit, Option<Rkey>, MemDriver),
     /// Blocks exceed the memory limit
     ///
     /// You'll need to provide a disk storage to continue. The commit will be
@@ -237,6 +237,7 @@ impl<R: AsyncRead + Unpin> Driver<R> {
 
         Ok(Driver::Memory(
             commit,
+            None,
             MemDriver {
                 blocks: mem_blocks,
                 walker,
@@ -268,19 +269,19 @@ pub struct MemDriver {
 
 impl MemDriver {
     /// Step through the record outputs, in rkey order
-    pub async fn next_chunk(&mut self, n: usize) -> Result<Option<BlockChunk>, DriveError> {
+    pub async fn next_chunk(&mut self, n: usize) -> Result<Step<BlockChunk>, DriveError> {
         let mut out = Vec::with_capacity(n);
         for _ in 0..n {
             // walk as far as we can until we run out of blocks or find a record
-            let Some(output) = self.walker.step(&mut self.blocks, self.process)? else {
+            let Step::Value(output) = self.walker.step(&mut self.blocks, self.process)? else {
                 break;
             };
             out.push(output);
         }
         if out.is_empty() {
-            Ok(None)
+            Ok(Step::End(None))
         } else {
-            Ok(Some(out))
+            Ok(Step::Value(out))
         }
     }
 }
@@ -299,7 +300,7 @@ impl<R: AsyncRead + Unpin> NeedDisk<R> {
     pub async fn finish_loading(
         mut self,
         mut store: DiskStore,
-    ) -> Result<(Commit, DiskDriver), DriveError> {
+    ) -> Result<(Commit, Option<Rkey>, DiskDriver), DriveError> {
         // move store in and back out so we can manage lifetimes
         // dump mem blocks into the store
         store = tokio::task::spawn(async move {
@@ -385,6 +386,7 @@ impl<R: AsyncRead + Unpin> NeedDisk<R> {
 
         Ok((
             commit,
+            None,
             DiskDriver {
                 process: self.process,
                 state: Some(BigState { store, walker }),
@@ -417,19 +419,19 @@ impl DiskDriver {
     /// Walk the MST returning up to `n` rkey + record pairs
     ///
     /// ```no_run
-    /// # use repo_stream::{drive::{DiskDriver, DriveError, _get_fake_disk_driver}, noop};
+    /// # use repo_stream::{drive::{DiskDriver, DriveError, _get_fake_disk_driver}, Step, noop};
     /// # #[tokio::main]
     /// # async fn main() -> Result<(), DriveError> {
     /// # let mut disk_driver = _get_fake_disk_driver();
-    /// while let Some(pairs) = disk_driver.next_chunk(256).await? {
-    ///     for output in pairs {
+    /// while let Step::Value(outputs) = disk_driver.next_chunk(256).await? {
+    ///     for output in outputs {
     ///         println!("{}: size={}", output.rkey, output.data.len());
     ///     }
     /// }
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn next_chunk(&mut self, n: usize) -> Result<Option<BlockChunk>, DriveError> {
+    pub async fn next_chunk(&mut self, n: usize) -> Result<Step<Vec<Output>>, DriveError> {
         let process = self.process;
 
         // state should only *ever* be None transiently while inside here
@@ -450,7 +452,7 @@ impl DiskDriver {
                             return (state, Err(e.into()));
                         }
                     };
-                    let Some(output) = step else {
+                    let Step::Value(output) = step else {
                         break;
                     };
                     out.push(output);
@@ -466,17 +468,17 @@ impl DiskDriver {
         let out = res?;
 
         if out.is_empty() {
-            Ok(None)
+            Ok(Step::End(None))
         } else {
-            Ok(Some(out))
+            Ok(Step::Value(out))
         }
     }
 
     fn read_tx_blocking(
         &mut self,
         n: usize,
-        tx: mpsc::Sender<Result<BlockChunk, DriveError>>,
-    ) -> Result<(), mpsc::error::SendError<Result<BlockChunk, DriveError>>> {
+        tx: mpsc::Sender<Result<Step<BlockChunk>, DriveError>>,
+    ) -> Result<(), mpsc::error::SendError<Result<Step<BlockChunk>, DriveError>>> {
         let BigState { store, walker } = self.state.as_mut().expect("valid state");
 
         loop {
@@ -490,7 +492,7 @@ impl DiskDriver {
                     Err(e) => return tx.blocking_send(Err(e.into())),
                 };
 
-                let Some(output) = step else {
+                let Step::Value(output) = step else {
                     break;
                 };
                 out.push(output);
@@ -499,7 +501,7 @@ impl DiskDriver {
             if out.is_empty() {
                 break;
             }
-            tx.blocking_send(Ok(out))?;
+            tx.blocking_send(Ok(Step::Value(out)))?;
         }
 
         Ok(())
@@ -516,14 +518,15 @@ impl DiskDriver {
     /// benefit over just using `.next_chunk(n)`.
     ///
     /// ```no_run
-    /// # use repo_stream::{drive::{DiskDriver, DriveError, _get_fake_disk_driver}, noop};
+    /// # use repo_stream::{drive::{DiskDriver, DriveError, _get_fake_disk_driver}, Step, noop};
     /// # #[tokio::main]
     /// # async fn main() -> Result<(), DriveError> {
     /// # let mut disk_driver = _get_fake_disk_driver();
     /// let (mut rx, join) = disk_driver.to_channel(512);
     /// while let Some(recvd) = rx.recv().await {
-    ///     let pairs = recvd?;
-    ///     for output in pairs {
+    ///     let outputs = recvd?;
+    ///     let Step::Value(outputs) = outputs else { break; };
+    ///     for output in outputs {
     ///         println!("{}: size={}", output.rkey, output.data.len());
     ///     }
     ///
@@ -535,10 +538,10 @@ impl DiskDriver {
         mut self,
         n: usize,
     ) -> (
-        mpsc::Receiver<Result<BlockChunk, DriveError>>,
+        mpsc::Receiver<Result<Step<BlockChunk>, DriveError>>,
         tokio::task::JoinHandle<Self>,
     ) {
-        let (tx, rx) = mpsc::channel::<Result<BlockChunk, DriveError>>(1);
+        let (tx, rx) = mpsc::channel::<Result<Step<BlockChunk>, DriveError>>(1);
 
         // sketch: this worker is going to be allowed to execute without a join handle
         let chan_task = tokio::task::spawn_blocking(move || {

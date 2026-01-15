@@ -11,7 +11,7 @@ A robust CAR file -> MST walker for atproto
 [sponsor-badge]: https://img.shields.io/badge/at-microcosm-b820f9?labelColor=b820f9&logo=githubsponsors&logoColor=fff
 
 ```rust no_run
-use repo_stream::{Driver, DriverBuilder, DriveError, DiskBuilder, Output};
+use repo_stream::{Driver, DriverBuilder, DriveError, DiskBuilder, Output, Step};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -31,8 +31,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
 
         // if all blocks fit within memory
-        Driver::Memory(_commit, mut driver) => {
-            while let Some(chunk) = driver.next_chunk(256).await? {
+        Driver::Memory(_commit, _prev_rkey, mut driver) => {
+            while let Step::Value(chunk) = driver.next_chunk(256).await? {
                 for Output { rkey: _, cid: _, data } in chunk {
                     let size = usize::from_ne_bytes(data.try_into().unwrap());
                     total_size += size;
@@ -45,9 +45,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // set up a disk store we can spill to
             let store = DiskBuilder::new().open("some/path.db".into()).await?;
             // do the spilling, get back a (similar) driver
-            let (_commit, mut driver) = paused.finish_loading(store).await?;
+            let (_commit, _prev_rkey, mut driver) = paused.finish_loading(store).await?;
 
-            while let Some(chunk) = driver.next_chunk(256).await? {
+            while let Step::Value(chunk) = driver.next_chunk(256).await? {
                 for Output { rkey: _, cid: _, data } in chunk {
                     let size = usize::from_ne_bytes(data.try_into().unwrap());
                     total_size += size;

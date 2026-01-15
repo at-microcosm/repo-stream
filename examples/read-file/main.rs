@@ -4,7 +4,7 @@ Read a CAR file with in-memory processing
 
 extern crate repo_stream;
 use clap::Parser;
-use repo_stream::{Driver, DriverBuilder};
+use repo_stream::{Driver, DriverBuilder, Step};
 use std::path::PathBuf;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -28,14 +28,14 @@ async fn main() -> Result<()> {
         .load_car(reader)
         .await?
     {
-        Driver::Memory(commit, mem_driver) => (commit, mem_driver),
+        Driver::Memory(commit, _, mem_driver) => (commit, mem_driver),
         Driver::Disk(_) => panic!("this example doesn't handle big CARs"),
     };
 
     log::info!("got commit: {commit:?}");
 
     let mut n = 0;
-    while let Some(pairs) = driver.next_chunk(256).await? {
+    while let Step::Value(pairs) = driver.next_chunk(256).await? {
         n += pairs.len();
         // log::info!("got {rkey:?}");
     }

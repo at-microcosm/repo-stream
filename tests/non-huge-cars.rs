@@ -1,6 +1,5 @@
 extern crate repo_stream;
-use repo_stream::Driver;
-use repo_stream::Output;
+use repo_stream::{Driver, Output, Step};
 
 const EMPTY_CAR: &'static [u8] = include_bytes!("../car-samples/empty.car");
 const TINY_CAR: &'static [u8] = include_bytes!("../car-samples/tiny.car");
@@ -21,7 +20,7 @@ async fn test_car(
     .await
     .unwrap()
     {
-        Driver::Memory(_commit, mem_driver) => mem_driver,
+        Driver::Memory(_commit, _, mem_driver) => mem_driver,
         Driver::Disk(_) => panic!("too big"),
     };
 
@@ -30,7 +29,7 @@ async fn test_car(
     let mut found_bsky_profile = false;
     let mut prev_rkey = "".to_string();
 
-    while let Some(pairs) = driver.next_chunk(256).await.unwrap() {
+    while let Step::Value(pairs) = driver.next_chunk(256).await.unwrap() {
         for Output { rkey, cid: _, data } in pairs {
             records += 1;
 

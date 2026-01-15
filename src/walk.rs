@@ -41,6 +41,12 @@ pub struct Output {
     pub data: Bytes,
 }
 
+#[derive(Debug, PartialEq)]
+pub enum Step<T = Output> {
+    Value(T),
+    End(Option<Rkey>),
+}
+
 /// Traverser of an atproto MST
 ///
 /// Walks the tree from left-to-right in depth-first order
@@ -134,16 +140,16 @@ impl Walker {
         &mut self,
         blocks: &mut HashMap<Cid, MaybeProcessedBlock>,
         process: impl Fn(Bytes) -> Bytes,
-    ) -> Result<Option<Output>, WalkError> {
+    ) -> Result<Step, WalkError> {
         while let Some(NodeThing { cid, kind }) = self.next_todo() {
             let Some(mpb) = blocks.get(&cid) else {
                 return Err(WalkError::MissingBlock(cid));
             };
             if let Some(out) = self.mpb_step(kind, cid, mpb, &process)? {
-                return Ok(Some(out));
+                return Ok(Step::Value(out));
             }
         }
-        Ok(None)
+        Ok(Step::End(None))
     }
 
     /// blocking!!!!!!
@@ -151,16 +157,16 @@ impl Walker {
         &mut self,
         blocks: &mut DiskStore,
         process: impl Fn(Bytes) -> Bytes,
-    ) -> Result<Option<Output>, WalkError> {
+    ) -> Result<Step, WalkError> {
         while let Some(NodeThing { cid, kind }) = self.next_todo() {
             let Some(block_slice) = blocks.get(&cid.to_bytes())? else {
                 return Err(WalkError::MissingBlock(cid));
             };
             let mpb = MaybeProcessedBlock::from_bytes(block_slice.to_vec());
             if let Some(out) = self.mpb_step(kind, cid, &mpb, &process)? {
-                return Ok(Some(out));
+                return Ok(Step::Value(out));
             }
         }
-        Ok(None)
+        Ok(Step::End(None))
     }
 }

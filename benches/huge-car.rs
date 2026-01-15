@@ -33,7 +33,7 @@ async fn drive_car(filename: impl AsRef<Path>) -> usize {
     let reader = tokio::io::BufReader::new(reader);
 
     let mut driver = match Driver::load_car(reader, ser, 1024).await.unwrap() {
-        Driver::Memory(_, mem_driver) => mem_driver,
+        Driver::Memory(_, _, mem_driver) => mem_driver,
         Driver::Disk(_) => panic!("not doing disk for benchmark"),
     };
 

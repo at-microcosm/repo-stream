@@ -18,7 +18,7 @@ Some MST validations are applied
 `iroh_car` additionally applies a block size limit of `2MiB`.
 
 ```
-use repo_stream::{Driver, DriverBuilder, DiskBuilder};
+use repo_stream::{Driver, DriverBuilder, DiskBuilder, Step};
 
 # #[tokio::main]
 # async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -35,8 +35,8 @@ match DriverBuilder::new()
 {
 
     // if all blocks fit within memory
-    Driver::Memory(_commit, mut driver) => {
-        while let Some(chunk) = driver.next_chunk(256).await? {
+    Driver::Memory(_commit, _prev_rkey, mut driver) => {
+        while let Step::Value(chunk) = driver.next_chunk(256).await? {
             for output in chunk {
                 let size = usize::from_ne_bytes(output.data.try_into().unwrap());
 
@@ -50,9 +50,9 @@ match DriverBuilder::new()
         // set up a disk store we can spill to
         let store = DiskBuilder::new().open("some/path.db".into()).await?;
         // do the spilling, get back a (similar) driver
-        let (_commit, mut driver) = paused.finish_loading(store).await?;
+        let (_commit, _prev_rkey, mut driver) = paused.finish_loading(store).await?;
 
-        while let Some(chunk) = driver.next_chunk(256).await? {
+        while let Step::Value(chunk) = driver.next_chunk(256).await? {
             for output in chunk {
                 let size = usize::from_ne_bytes(output.data.try_into().unwrap());
 
@@ -86,7 +86,7 @@ pub mod drive;
 pub use disk::{DiskBuilder, DiskError, DiskStore};
 pub use drive::{DriveError, Driver, DriverBuilder, NeedDisk, noop};
 pub use mst::Commit;
-pub use walk::Output;
+pub use walk::{Output, Step};
 
 pub type Bytes = Vec<u8>;
 

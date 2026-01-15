@@ -1,5 +1,5 @@
 extern crate repo_stream;
-use repo_stream::Driver;
+use repo_stream::{Driver, Step};
 
 use criterion::{Criterion, criterion_group, criterion_main};
 
@@ -40,12 +40,12 @@ fn ser(block: Vec<u8>) -> Vec<u8> {
 
 async fn drive_car(bytes: &[u8]) -> usize {
     let mut driver = match Driver::load_car(bytes, ser, 32).await.unwrap() {
-        Driver::Memory(_, mem_driver) => mem_driver,
+        Driver::Memory(_, _, mem_driver) => mem_driver,
         Driver::Disk(_) => panic!("not benching big cars here"),
     };
 
     let mut n = 0;
-    while let Some(pairs) = driver.next_chunk(256).await.unwrap() {
+    while let Step::Value(pairs) = driver.next_chunk(256).await.unwrap() {
         n += pairs.len();
     }
     n

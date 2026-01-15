@@ -9,7 +9,7 @@ use mimalloc::MiMalloc;
 static GLOBAL: MiMalloc = MiMalloc;
 
 use clap::Parser;
-use repo_stream::{DiskBuilder, Driver, DriverBuilder};
+use repo_stream::{DiskBuilder, Driver, DriverBuilder, Step};
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -42,7 +42,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .load_car(reader)
         .await?
     {
-        Driver::Memory(_, _) => panic!("try this on a bigger car"),
+        Driver::Memory(_, _, _) => panic!("try this on a bigger car"),
         Driver::Disk(big_stuff) => {
             // we reach here if the repo was too big and needs to be spilled to
             // disk to continue
@@ -51,7 +51,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let disk_store = DiskBuilder::new().open(tmpfile).await?;
 
             // do the spilling, get back a (similar) driver
-            let (commit, driver) = big_stuff.finish_loading(disk_store).await?;
+            let (commit, _, driver) = big_stuff.finish_loading(disk_store).await?;
 
             // at this point you might want to fetch the account's signing key
             // via the DID from the commit, and then verify the signature.
@@ -74,13 +74,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // this example uses the disk driver's channel mode: the tree walking is
     // spawned onto a blocking thread, and we get chunks of rkey+blocks back
     let (mut rx, join) = driver.to_channel(512);
-    while let Some(r) = rx.recv().await {
-        let pairs = r?;
+    while let Some(step) = rx.recv().await {
+        let step = step?;
+        let Step::Value(outputs) = step else {
+            break;
+        };
 
         // keep a count of the total number of blocks seen
-        n += pairs.len();
+        n += outputs.len();
 
-        for output in pairs {
+        for output in outputs {
             // for each block, count how many bytes are equal to '0'
             // (this is just an example, you probably want to do something more
             // interesting)
