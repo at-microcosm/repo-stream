@@ -1,3 +1,10 @@
+# v0.3.1
+
+_2026-01-15_
+
+- bring back the disk driver's `reset` function for disk storage reuse
+
+
 # v0.3.0
 
 _2026-01-15_
