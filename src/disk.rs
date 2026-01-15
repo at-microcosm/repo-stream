@@ -94,7 +94,7 @@ impl DiskBuilder {
 pub struct DiskStore {
     #[allow(unused)]
     db: Database,
-    partition: Keyspace,
+    keyspace: Keyspace,
     max_stored: usize,
     stored: usize,
 }
@@ -107,7 +107,7 @@ impl DiskStore {
         max_stored_mb: usize,
     ) -> Result<Self, DiskError> {
         let max_stored = max_stored_mb * 2_usize.pow(20);
-        let (db, partition) = tokio::task::spawn_blocking(move || {
+        let (db, keyspace) = tokio::task::spawn_blocking(move || {
             let db = Database::builder(path)
                 .manual_journal_persist(true)
                 .worker_threads(1)
@@ -117,15 +117,15 @@ impl DiskStore {
             let opts = KeyspaceCreateOptions::default()
                 .expect_point_read_hits(true)
                 .max_memtable_size(16 * 2_u64.pow(20));
-            let partition = db.keyspace("z", || opts)?;
+            let keyspace = db.keyspace("z", || opts)?;
 
-            Ok::<_, DiskError>((db, partition))
+            Ok::<_, DiskError>((db, keyspace))
         })
         .await??;
 
         Ok(Self {
             db,
-            partition,
+            keyspace,
             max_stored,
             stored: 0,
         })
@@ -141,7 +141,7 @@ impl DiskStore {
             if self.stored > self.max_stored {
                 return Err(DiskError::MaxSizeExceeded.into());
             }
-            batch.insert(&self.partition, k, v);
+            batch.insert(&self.keyspace, k, v);
         }
         batch.commit().map_err(DiskError::DbError)?;
         Ok(())
@@ -149,6 +149,12 @@ impl DiskStore {
 
     #[inline]
     pub(crate) fn get(&mut self, key: &[u8]) -> Result<Option<fjall::Slice>, FjallError> {
-        self.partition.get(key)
+        self.keyspace.get(key)
+    }
+
+    /// Drop and recreate the kv table
+    pub async fn reset(&self) -> Result<(), DiskError> {
+        let keyspace = self.keyspace.clone();
+        Ok(tokio::task::spawn_blocking(move || keyspace.clear()).await??)
     }
 }

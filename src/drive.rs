@@ -552,4 +552,13 @@ impl DiskDriver {
 
         (rx, chan_task)
     }
+
+    /// Reset the disk storage so it can be reused.
+    ///
+    /// The store is returned, so it can be reused for another `DiskDriver`.
+    pub async fn reset_store(mut self) -> Result<DiskStore, DriveError> {
+        let BigState { store, .. } = self.state.take().expect("valid state");
+        store.reset().await?;
+        Ok(store)
+    }
 }
