@@ -56,13 +56,13 @@ pub(crate) struct MstNode {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct NodeThing {
-    pub(crate) cid: Cid,
-    pub(crate) kind: ThingKind,
+pub struct NodeThing {
+    pub cid: Cid,
+    pub kind: ThingKind,
 }
 
 #[derive(Debug, Clone)]
-pub(crate) enum ThingKind {
+pub enum ThingKind {
     Tree,
     Value { rkey: Rkey },
 }

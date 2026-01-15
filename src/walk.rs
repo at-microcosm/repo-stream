@@ -16,8 +16,8 @@ pub enum WalkError {
     MstError(#[from] MstError),
     #[error("storage error: {0}")]
     StorageError(#[from] fjall::Error),
-    #[error("block not found: {0}")]
-    MissingBlock(Cid),
+    #[error("block not found: {0:?}")]
+    MissingBlock(NodeThing),
 }
 
 /// Errors from invalid Rkeys
@@ -143,7 +143,7 @@ impl Walker {
     ) -> Result<Step, WalkError> {
         while let Some(NodeThing { cid, kind }) = self.next_todo() {
             let Some(mpb) = blocks.get(&cid) else {
-                return Err(WalkError::MissingBlock(cid));
+                return Err(WalkError::MissingBlock(NodeThing { cid, kind }));
             };
             if let Some(out) = self.mpb_step(kind, cid, mpb, &process)? {
                 return Ok(Step::Value(out));
@@ -189,7 +189,7 @@ impl Walker {
                     ant.mpb_step(kind, cid, mpb, noop)?;
                 }
                 (ThingKind::Tree, None) => {
-                    return Err(WalkError::MissingBlock(cid));
+                    return Err(WalkError::MissingBlock(NodeThing { cid, kind }));
                 }
             }
         }
@@ -203,7 +203,7 @@ impl Walker {
     ) -> Result<Step, WalkError> {
         while let Some(NodeThing { cid, kind }) = self.next_todo() {
             let Some(block_slice) = blocks.get(&cid.to_bytes())? else {
-                return Err(WalkError::MissingBlock(cid));
+                return Err(WalkError::MissingBlock(NodeThing { cid, kind }));
             };
             let mpb = MaybeProcessedBlock::from_bytes(block_slice.to_vec());
             if let Some(out) = self.mpb_step(kind, cid, &mpb, &process)? {
