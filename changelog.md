@@ -1,3 +1,10 @@
+# v0.4.0
+
+_2026-01-15_
+
+- use `Output { rkey, cid, data }` instead of the `(rkey, data)` tuple so that the `Cid` is exposed. this is to make tap-like diffing possible.
+
+
 # v0.3.1
 
 _2026-01-15_

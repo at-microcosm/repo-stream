@@ -35,8 +35,8 @@ pub enum DriveError {
     JoinError(#[from] tokio::task::JoinError),
 }
 
-/// An in-order chunk of Rkey + (processed) Block pairs
-pub type BlockChunk = Vec<(String, Bytes)>;
+/// An in-order chunk of Rkey + CID + (processed) Block
+pub type BlockChunk = Vec<Output>;
 
 #[derive(Debug, Clone)]
 pub(crate) enum MaybeProcessedBlock {
@@ -272,12 +272,10 @@ impl MemDriver {
         let mut out = Vec::with_capacity(n);
         for _ in 0..n {
             // walk as far as we can until we run out of blocks or find a record
-            let Some(Output { rkey, cid: _, data }) =
-                self.walker.step(&mut self.blocks, self.process)?
-            else {
+            let Some(output) = self.walker.step(&mut self.blocks, self.process)? else {
                 break;
             };
-            out.push((rkey, data));
+            out.push(output);
         }
         if out.is_empty() {
             Ok(None)
@@ -424,8 +422,8 @@ impl DiskDriver {
     /// # async fn main() -> Result<(), DriveError> {
     /// # let mut disk_driver = _get_fake_disk_driver();
     /// while let Some(pairs) = disk_driver.next_chunk(256).await? {
-    ///     for (rkey, record) in pairs {
-    ///         println!("{rkey}: size={}", record.len());
+    ///     for output in pairs {
+    ///         println!("{}: size={}", output.rkey, output.data.len());
     ///     }
     /// }
     /// # Ok(())
@@ -452,10 +450,10 @@ impl DiskDriver {
                             return (state, Err(e.into()));
                         }
                     };
-                    let Some(Output { rkey, cid: _, data }) = step else {
+                    let Some(output) = step else {
                         break;
                     };
-                    out.push((rkey, data));
+                    out.push(output);
                 }
 
                 (state, Ok::<_, DriveError>(out))
@@ -492,10 +490,10 @@ impl DiskDriver {
                     Err(e) => return tx.blocking_send(Err(e.into())),
                 };
 
-                let Some(Output { rkey, cid: _, data }) = step else {
+                let Some(output) = step else {
                     break;
                 };
-                out.push((rkey, data));
+                out.push(output);
             }
 
             if out.is_empty() {
@@ -525,8 +523,8 @@ impl DiskDriver {
     /// let (mut rx, join) = disk_driver.to_channel(512);
     /// while let Some(recvd) = rx.recv().await {
     ///     let pairs = recvd?;
-    ///     for (rkey, record) in pairs {
-    ///         println!("{rkey}: size={}", record.len());
+    ///     for output in pairs {
+    ///         println!("{}: size={}", output.rkey, output.data.len());
     ///     }
     ///
     /// }

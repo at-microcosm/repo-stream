@@ -80,11 +80,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // keep a count of the total number of blocks seen
         n += pairs.len();
 
-        for (_, block) in pairs {
+        for output in pairs {
             // for each block, count how many bytes are equal to '0'
             // (this is just an example, you probably want to do something more
             // interesting)
-            zeros += block.into_iter().filter(|&b| b == b'0').count()
+            zeros += output.data.into_iter().filter(|&b| b == b'0').count()
         }
     }
 

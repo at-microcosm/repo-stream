@@ -11,7 +11,7 @@ A robust CAR file -> MST walker for atproto
 [sponsor-badge]: https://img.shields.io/badge/at-microcosm-b820f9?labelColor=b820f9&logo=githubsponsors&logoColor=fff
 
 ```rust no_run
-use repo_stream::{Driver, DriverBuilder, DriveError, DiskBuilder};
+use repo_stream::{Driver, DriverBuilder, DriveError, DiskBuilder, Output};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -33,8 +33,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // if all blocks fit within memory
         Driver::Memory(_commit, mut driver) => {
             while let Some(chunk) = driver.next_chunk(256).await? {
-                for (_rkey, processed) in chunk {
-                    let size = usize::from_ne_bytes(processed.try_into().unwrap());
+                for Output { rkey: _, cid: _, data } in chunk {
+                    let size = usize::from_ne_bytes(data.try_into().unwrap());
                     total_size += size;
                 }
             }
@@ -48,8 +48,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let (_commit, mut driver) = paused.finish_loading(store).await?;
 
             while let Some(chunk) = driver.next_chunk(256).await? {
-                for (_rkey, processed) in chunk {
-                    let size = usize::from_ne_bytes(processed.try_into().unwrap());
+                for Output { rkey: _, cid: _, data } in chunk {
+                    let size = usize::from_ne_bytes(data.try_into().unwrap());
                     total_size += size;
                 }
             }

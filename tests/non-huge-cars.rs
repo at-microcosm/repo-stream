@@ -1,5 +1,6 @@
 extern crate repo_stream;
 use repo_stream::Driver;
+use repo_stream::Output;
 
 const EMPTY_CAR: &'static [u8] = include_bytes!("../car-samples/empty.car");
 const TINY_CAR: &'static [u8] = include_bytes!("../car-samples/tiny.car");
@@ -30,10 +31,10 @@ async fn test_car(
     let mut prev_rkey = "".to_string();
 
     while let Some(pairs) = driver.next_chunk(256).await.unwrap() {
-        for (rkey, bytes) in pairs {
+        for Output { rkey, cid: _, data } in pairs {
             records += 1;
 
-            let (int_bytes, _) = bytes.split_at(size_of::<usize>());
+            let (int_bytes, _) = data.split_at(size_of::<usize>());
             let size = usize::from_ne_bytes(int_bytes.try_into().unwrap());
 
             sum += size;

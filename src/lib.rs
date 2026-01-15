@@ -37,8 +37,8 @@ match DriverBuilder::new()
     // if all blocks fit within memory
     Driver::Memory(_commit, mut driver) => {
         while let Some(chunk) = driver.next_chunk(256).await? {
-            for (_rkey, bytes) in chunk {
-                let size = usize::from_ne_bytes(bytes.try_into().unwrap());
+            for output in chunk {
+                let size = usize::from_ne_bytes(output.data.try_into().unwrap());
 
                 total_size += size;
             }
@@ -53,8 +53,8 @@ match DriverBuilder::new()
         let (_commit, mut driver) = paused.finish_loading(store).await?;
 
         while let Some(chunk) = driver.next_chunk(256).await? {
-            for (_rkey, bytes) in chunk {
-                let size = usize::from_ne_bytes(bytes.try_into().unwrap());
+            for output in chunk {
+                let size = usize::from_ne_bytes(output.data.try_into().unwrap());
 
                 total_size += size;
             }
@@ -86,6 +86,7 @@ pub mod drive;
 pub use disk::{DiskBuilder, DiskError, DiskStore};
 pub use drive::{DriveError, Driver, DriverBuilder, NeedDisk, noop};
 pub use mst::Commit;
+pub use walk::Output;
 
 pub type Bytes = Vec<u8>;
 
