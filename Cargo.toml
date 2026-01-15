@@ -1,9 +1,9 @@
 [package]
 name = "repo-stream"
-version = "0.2.2"
+version = "0.3.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
-description = "A robust CAR file -> MST walker for atproto"
+description = "Fast and robust atproto CAR file processing"
 repository = "https://tangled.org/@microcosm.blue/repo-stream"
 
 [dependencies]

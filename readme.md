@@ -58,11 +58,16 @@ async fn main() -> Result<(), DriveError> {
 ```
 
 more recent todo
+- [ ] add a zero-copy rkyv process function example
 - [ ] repo car slices
 - [ ] lazy-value stream (rkey -> CID diffing for tap-like `#sync` handling)
 - [x] get an *emtpy* car for the test suite
 - [x] implement a max size on disk limit
 
+some ideas
+- [ ] since the disk k/v get/set interface is now so similar to HashMap (blocking, no transactions,), it's probably possible to make a single `Driver` and move the thread stuff from the disk one to generic helper functions. (might create async footguns though)
+- [ ] fork iroh-car into a sync version so we can drop tokio as a hard requirement, and offer async via wrapper helper things
+- [ ] feature-flag the sha2 crate for hmac-sha256? if someone wanted fewer deps?? then maybe make `hashbrown` also optional vs builtin hashmap?
 
 -----
 
@@ -132,21 +137,21 @@ todo
 - [x] car file test fixtures & validation tests
 - [x] make sure we can get the did and signature out for verification
   -> yeah the commit is returned from init
-- [ ] spec compliance todos
+- [x] spec compliance todos
   - [x] assert that keys are ordered and fail if not
   - [x] verify node mst depth from key (possibly pending [interop test fixes](https://github.com/bluesky-social/atproto-interop-tests/issues/5))
-- [ ] performance todos
+- [x] performance todos
   - [x] consume the serialized nodes into a mutable efficient format
-    - [ ] maybe customize the deserialize impl to do that directly?
+    - [x] maybe customize the deserialize impl to do that directly?
   - [x] benchmark and profile
-- [ ] robustness todos
-  - [ ] swap the blocks hashmap for a BlockStore trait that can be dumped to redb
-    - [ ] maybe keep the redb function behind a feature flag?
-  - [ ] can we assert a max size for node blocks?
+- [x] robustness todos
+  - [x] swap the blocks hashmap for a BlockStore trait that can be dumped to redb
+    - [x] maybe keep the redb function behind a feature flag?
+  - [ ] can we assert a max size of entries for node blocks?
   - [x] figure out why asserting the upper nibble of the fourth byte of a node fails fingerprinting
     -> because it's the upper 3 bytes, not upper 4 byte nibble, oops.
-  - [ ] max mst depth (there is actually a hard limit but a malicious repo could do anything)
-  - [ ] i don't *think* we need a max recursion depth for processing cbor contents since we leave records to the user to decode
+  - [x] max mst depth (to expensive to attack actually)
+  - [x] i don't *think* we need a max recursion depth for processing cbor contents since we leave records to the user to decode
 
 newer ideas
 
