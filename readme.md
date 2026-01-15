@@ -10,13 +10,13 @@ A robust CAR file -> MST walker for atproto
 [docs-badge]: https://docs.rs/repo-stream/badge.svg
 [sponsor-badge]: https://img.shields.io/badge/at-microcosm-b820f9?labelColor=b820f9&logo=githubsponsors&logoColor=fff
 
-```rust
+```rust no_run
 use repo_stream::{Driver, DriverBuilder, DriveError, DiskBuilder};
 
 #[tokio::main]
-async fn main() -> Result<(), DriveError> {
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // repo-stream takes any AsyncRead as input, like a tokio::fs::File
-    let reader = tokio::fs::File::open("repo.car".into()).await?;
+    let reader = tokio::fs::File::open("repo.car").await?;
     let reader = tokio::io::BufReader::new(reader);
 
     // example repo workload is simply counting the total record bytes
@@ -24,7 +24,8 @@ async fn main() -> Result<(), DriveError> {
 
     match DriverBuilder::new()
         .with_mem_limit_mb(10)
-        .with_block_processor(|rec| rec.len()) // block processing: just extract the raw record size
+        .with_block_processor( // block processing: just extract the raw record size
+          |rec| rec.len().to_ne_bytes().to_vec())
         .load_car(reader)
         .await?
     {
@@ -32,7 +33,8 @@ async fn main() -> Result<(), DriveError> {
         // if all blocks fit within memory
         Driver::Memory(_commit, mut driver) => {
             while let Some(chunk) = driver.next_chunk(256).await? {
-                for (_rkey, size) in chunk {
+                for (_rkey, processed) in chunk {
+                    let size = usize::from_ne_bytes(processed.try_into().unwrap());
                     total_size += size;
                 }
             }
@@ -46,7 +48,8 @@ async fn main() -> Result<(), DriveError> {
             let (_commit, mut driver) = paused.finish_loading(store).await?;
 
             while let Some(chunk) = driver.next_chunk(256).await? {
-                for (_rkey, size) in chunk {
+                for (_rkey, processed) in chunk {
+                    let size = usize::from_ne_bytes(processed.try_into().unwrap());
                     total_size += size;
                 }
             }

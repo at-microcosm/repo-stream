@@ -28,7 +28,7 @@ let mut total_size = 0;
 match DriverBuilder::new()
     .with_mem_limit_mb(10)
     .with_block_processor(
-        |rec| rec.len().to_ne_bytes().to_vec().into()
+        |rec| rec.len().to_ne_bytes().to_vec()
     ) // block processing: just extract the raw record size
     .load_car(reader)
     .await?
@@ -38,9 +38,7 @@ match DriverBuilder::new()
     Driver::Memory(_commit, mut driver) => {
         while let Some(chunk) = driver.next_chunk(256).await? {
             for (_rkey, bytes) in chunk {
-
-                let (int_bytes, _) = bytes.split_at(size_of::<usize>());
-                let size = usize::from_ne_bytes(int_bytes.try_into().unwrap());
+                let size = usize::from_ne_bytes(bytes.try_into().unwrap());
 
                 total_size += size;
             }
@@ -56,9 +54,7 @@ match DriverBuilder::new()
 
         while let Some(chunk) = driver.next_chunk(256).await? {
             for (_rkey, bytes) in chunk {
-
-                let (int_bytes, _) = bytes.split_at(size_of::<usize>());
-                let size = usize::from_ne_bytes(int_bytes.try_into().unwrap());
+                let size = usize::from_ne_bytes(bytes.try_into().unwrap());
 
                 total_size += size;
             }
@@ -91,7 +87,10 @@ pub use disk::{DiskBuilder, DiskError, DiskStore};
 pub use drive::{DriveError, Driver, DriverBuilder, NeedDisk, noop};
 pub use mst::Commit;
 
-// pub use bytes::Bytes;
 pub type Bytes = Vec<u8>;
 
 pub(crate) use hashbrown::HashMap;
+
+#[doc = include_str!("../readme.md")]
+#[cfg(doctest)]
+pub struct ReadmeDoctests;
