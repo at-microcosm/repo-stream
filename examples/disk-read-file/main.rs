@@ -65,10 +65,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    let Some(driver) = driver else {
-        panic!("big car but somehow empty MST: is the archive stuffed with garbage?");
-    };
-
     // collect some random stats about the blocks
     let mut n = 0;
     let mut zeros = 0;

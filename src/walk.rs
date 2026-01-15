@@ -52,12 +52,12 @@ pub struct Walker {
 }
 
 impl Walker {
-    pub fn new(root_node: MstNode) -> Option<Self> {
-        Some(Self {
+    pub fn new(root_node: MstNode) -> Self {
+        Self {
             prev_rkey: "".to_string(),
-            root_depth: root_node.depth?,
+            root_depth: root_node.depth.unwrap_or(0), // empty root node = empty mst
             todo: vec![root_node.things],
-        })
+        }
     }
 
     fn mpb_step(

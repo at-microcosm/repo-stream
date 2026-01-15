@@ -74,9 +74,9 @@ current car processing times (records processed into their length usize, phil's 
 - 450MiB CAR file (huge): `1.3s`
 - 128MiB (huge): `350ms`
 - 5.0MiB: `6.8ms`
-- 279KiB: `170us`
-- 3.4KiB: `5.2us`
-- empty: `670ns`
+- 279KiB: `160us`
+- 3.4KiB: `5.1us`
+- empty: `690ns`
 
 it's a little faster with `mimalloc`
 
@@ -88,10 +88,10 @@ static GLOBAL: MiMalloc = MiMalloc;
 
 - 450MiB CAR file: `1.2s` (-8%)
 - 128MiB: `300ms` (-14%)
-- 5.0MiB: `6.0ms` (-12%)
-- 279KiB: `140us` (-21%)
-- 3.4KiB: `4.7us` (-10%)
-- empty: `640ns` (-4%)
+- 5.0MiB: `6.0ms` (-11%)
+- 279KiB: `150us` (-7%)
+- 3.4KiB: `4.7us` (-8%)
+- empty: `670ns` (-4%)
 
 processing CARs requires buffering blocks, so it can consume a lot of memory. repo-stream's in-memory driver has minimal memory overhead, but there are two ways to make it work with less mem (you can do either or both!)
 

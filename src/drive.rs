@@ -107,7 +107,7 @@ pub enum Driver<R: AsyncRead + Unpin> {
     ///
     /// You probably want to check the commit's signature. You can go ahead and
     /// walk the MST right away.
-    Memory(Commit, Option<MemDriver>),
+    Memory(Commit, MemDriver),
     /// Blocks exceed the memory limit
     ///
     /// You'll need to provide a disk storage to continue. The commit will be
@@ -233,18 +233,15 @@ impl<R: AsyncRead + Unpin> Driver<R> {
             MaybeProcessedBlock::Processed(_) => Err(WalkError::BadCommitFingerprint)?,
             MaybeProcessedBlock::Raw(bytes) => serde_ipld_dagcbor::from_slice(bytes)?,
         };
-        let Some(walker) = Walker::new(root_node) else {
-            // TODO: actually we still want the commit in this case
-            return Ok(Driver::Memory(commit, None));
-        };
+        let walker = Walker::new(root_node);
 
         Ok(Driver::Memory(
             commit,
-            Some(MemDriver {
+            MemDriver {
                 blocks: mem_blocks,
                 walker,
                 process,
-            }),
+            },
         ))
     }
 }
@@ -304,7 +301,7 @@ impl<R: AsyncRead + Unpin> NeedDisk<R> {
     pub async fn finish_loading(
         mut self,
         mut store: DiskStore,
-    ) -> Result<(Commit, Option<DiskDriver>), DriveError> {
+    ) -> Result<(Commit, DiskDriver), DriveError> {
         // move store in and back out so we can manage lifetimes
         // dump mem blocks into the store
         store = tokio::task::spawn(async move {
@@ -386,16 +383,14 @@ impl<R: AsyncRead + Unpin> NeedDisk<R> {
             MaybeProcessedBlock::Processed(_) => Err(WalkError::BadCommitFingerprint)?,
             MaybeProcessedBlock::Raw(bytes) => serde_ipld_dagcbor::from_slice(&bytes)?,
         };
-        let Some(walker) = Walker::new(node) else {
-            return Ok((commit, None));
-        };
+        let walker = Walker::new(node);
 
         Ok((
             commit,
-            Some(DiskDriver {
+            DiskDriver {
                 process: self.process,
                 state: Some(BigState { store, walker }),
-            }),
+            },
         ))
     }
 }
