@@ -3,10 +3,17 @@
 //! The primary aim is to work through the **tree** structure. Non-node blocks
 //! are left as raw bytes, for upper levels to parse into DAG-CBOR or whatever.
 
-use crate::Rkey;
+use crate::{
+    link::{NodeThing, ObjectLink},
+    walk::MstError,
+};
 use cid::Cid;
 use serde::Deserialize;
+use serde::de::{self, Deserializer, MapAccess, Unexpected, Visitor};
 use sha2::{Digest, Sha256};
+use std::fmt;
+
+pub type Depth = u32;
 
 /// The top-level data object in a repository's tree is a signed commit.
 #[derive(Debug, Deserialize)]
@@ -38,10 +45,12 @@ pub struct Commit {
     pub sig: serde_bytes::ByteBuf,
 }
 
-use serde::de::{self, Deserializer, MapAccess, Unexpected, Visitor};
-use std::fmt;
-
-pub type Depth = u32;
+impl Commit {
+    pub fn data_link(&self) -> Result<ObjectLink, MstError> {
+        let strict = self.data.try_into().map_err(MstError::MissingRootNode)?;
+        Ok(ObjectLink::Should(strict))
+    }
+}
 
 #[inline(always)]
 pub fn atproto_mst_depth(key: &str) -> Depth {
@@ -53,18 +62,6 @@ pub fn atproto_mst_depth(key: &str) -> Depth {
 pub(crate) struct MstNode {
     pub depth: Option<Depth>, // known for nodes with entries (required for root)
     pub things: Vec<NodeThing>,
-}
-
-#[derive(Debug, Clone)]
-pub struct NodeThing {
-    pub cid: Cid,
-    pub kind: ThingKind,
-}
-
-#[derive(Debug, Clone)]
-pub enum ThingKind {
-    Tree,
-    Value { rkey: Rkey },
 }
 
 impl<'de> Deserialize<'de> for MstNode {
@@ -98,10 +95,13 @@ impl<'de> Deserialize<'de> for MstNode {
                             }
                             found_left = true;
                             if let Some(cid) = map.next_value()? {
-                                left = Some(NodeThing {
-                                    cid,
-                                    kind: ThingKind::Tree,
-                                });
+                                let Ok(strict) = Cid::try_into(cid) else {
+                                    return Err(de::Error::invalid_value(
+                                        Unexpected::Bytes(&cid.to_bytes()),
+                                        &"a strict atproto sha256 CID link",
+                                    ));
+                                };
+                                left = Some(NodeThing::ChildNode(strict));
                             }
                         }
                         "e" => {
@@ -142,16 +142,16 @@ impl<'de> Deserialize<'de> for MstNode {
                                     ));
                                 }
 
-                                things.push(NodeThing {
-                                    cid: entry.value,
-                                    kind: ThingKind::Value { rkey: rkey_s },
-                                });
+                                things.push(NodeThing::Record(rkey_s, entry.value.into()));
 
                                 if let Some(cid) = entry.tree {
-                                    things.push(NodeThing {
-                                        cid,
-                                        kind: ThingKind::Tree,
-                                    });
+                                    let Ok(strict) = cid.try_into() else {
+                                        return Err(de::Error::invalid_value(
+                                            Unexpected::Bytes(&cid.to_bytes()),
+                                            &"a strict atproto sha256 CID link",
+                                        ));
+                                    };
+                                    things.push(NodeThing::ChildNode(strict));
                                 }
 
                                 prefix = rkey;

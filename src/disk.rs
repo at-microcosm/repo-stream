@@ -148,7 +148,7 @@ impl DiskStore {
     }
 
     #[inline]
-    pub(crate) fn get(&mut self, key: &[u8]) -> Result<Option<fjall::Slice>, FjallError> {
+    pub(crate) fn get(&self, key: &[u8]) -> Result<Option<fjall::Slice>, FjallError> {
         self.keyspace.get(key)
     }
 

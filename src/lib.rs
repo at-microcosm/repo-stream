@@ -82,9 +82,11 @@ mod walk;
 
 pub mod disk;
 pub mod drive;
+pub mod link;
 
 pub use disk::{DiskBuilder, DiskError, DiskStore};
 pub use drive::{DriveError, Driver, DriverBuilder, NeedDisk, noop};
+pub use link::NodeThing;
 pub use mst::Commit;
 pub use walk::{Output, Step};
 

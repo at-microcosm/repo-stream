@@ -1,10 +1,11 @@
 //! Consume a CAR from an AsyncRead, producing an ordered stream of records
 
+use crate::link::ObjectLink;
 use crate::{
     Bytes, HashMap, Rkey, Step,
     disk::{DiskError, DiskStore},
     mst::MstNode,
-    walk::Output,
+    walk::{MstError, Output},
 };
 use cid::Cid;
 use iroh_car::CarReader;
@@ -33,6 +34,12 @@ pub enum DriveError {
     ChannelSendError, // SendError takes <T> which we don't need
     #[error("Failed to join a task: {0}")]
     JoinError(#[from] tokio::task::JoinError),
+}
+
+impl From<MstError> for DriveError {
+    fn from(me: MstError) -> DriveError {
+        DriveError::WalkError(WalkError::MstError(me))
+    }
 }
 
 /// An in-order chunk of Rkey + CID + (processed) Block
@@ -209,7 +216,7 @@ impl<R: AsyncRead + Unpin> Driver<R> {
 
             // stash (maybe processed) blocks in memory as long as we have room
             mem_size += maybe_processed.len();
-            mem_blocks.insert(cid, maybe_processed);
+            mem_blocks.insert(cid.into(), maybe_processed);
             if mem_size >= max_size {
                 return Ok(Driver::Disk(NeedDisk {
                     car,
@@ -227,7 +234,7 @@ impl<R: AsyncRead + Unpin> Driver<R> {
 
         // the commit always must point to a Node; empty node => empty MST special case
         let root_node: MstNode = match mem_blocks
-            .get(&commit.data)
+            .get(&commit.data_link()?)
             .ok_or(DriveError::MissingCommit)?
         {
             MaybeProcessedBlock::Processed(_) => Err(WalkError::BadCommitFingerprint)?,
@@ -262,7 +269,7 @@ impl<R: AsyncRead + Unpin> Driver<R> {
 /// so the sync/async boundaries become a little easier to work around.
 #[derive(Debug)]
 pub struct MemDriver {
-    blocks: HashMap<Cid, MaybeProcessedBlock>,
+    blocks: HashMap<ObjectLink, MaybeProcessedBlock>,
     walker: Walker,
     process: fn(Bytes) -> Bytes,
 }
@@ -273,7 +280,7 @@ impl MemDriver {
         let mut out = Vec::with_capacity(n);
         for _ in 0..n {
             // walk as far as we can until we run out of blocks or find a record
-            let Step::Value(output) = self.walker.step(&mut self.blocks, self.process)? else {
+            let Step::Value(output) = self.walker.step(&self.blocks, self.process)? else {
                 break;
             };
             out.push(output);
@@ -292,7 +299,7 @@ pub struct NeedDisk<R: AsyncRead + Unpin> {
     root: Cid,
     process: fn(Bytes) -> Bytes,
     max_size: usize,
-    mem_blocks: HashMap<Cid, MaybeProcessedBlock>,
+    mem_blocks: HashMap<ObjectLink, MaybeProcessedBlock>,
     pub commit: Option<Commit>,
 }
 
@@ -314,7 +321,7 @@ impl<R: AsyncRead + Unpin> NeedDisk<R> {
         })
         .await??;
 
-        let (tx, mut rx) = mpsc::channel::<Vec<(Cid, MaybeProcessedBlock)>>(1);
+        let (tx, mut rx) = mpsc::channel::<Vec<(ObjectLink, MaybeProcessedBlock)>>(1);
 
         let store_worker = tokio::task::spawn_blocking(move || {
             while let Some(chunk) = rx.blocking_recv() {
@@ -342,13 +349,14 @@ impl<R: AsyncRead + Unpin> NeedDisk<R> {
                     continue;
                 }
 
+                let link = cid.into();
                 let data = Bytes::from(data);
 
                 // remaining possible types: node, record, other. optimistically process
                 // TODO: get the actual in-memory size to compute disk spill
                 let maybe_processed = MaybeProcessedBlock::maybe(self.process, data);
                 mem_size += maybe_processed.len();
-                chunk.push((cid, maybe_processed));
+                chunk.push((link, maybe_processed));
                 if mem_size >= (self.max_size / 2) {
                     // soooooo if we're setting the db cache to max_size and then letting
                     // multiple chunks in the queue that are >= max_size, then at any time
@@ -372,9 +380,8 @@ impl<R: AsyncRead + Unpin> NeedDisk<R> {
 
         let commit = self.commit.ok_or(DriveError::MissingCommit)?;
 
-        // the commit always must point to a Node; empty node => empty MST special case
         let db_bytes = store
-            .get(&commit.data.to_bytes())
+            .get(&commit.data_link()?.to_bytes())
             .map_err(|e| DriveError::StorageError(DiskError::DbError(e)))?
             .ok_or(DriveError::MissingCommit)?;
 
@@ -446,7 +453,7 @@ impl DiskDriver {
 
                 for _ in 0..n {
                     // walk as far as we can until we run out of blocks or find a record
-                    let step = match state.walker.disk_step(&mut state.store, process) {
+                    let step = match state.walker.disk_step(&state.store, process) {
                         Ok(s) => s,
                         Err(e) => {
                             return (state, Err(e.into()));

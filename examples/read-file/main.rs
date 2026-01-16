@@ -4,7 +4,7 @@ Read a CAR file with in-memory processing
 
 extern crate repo_stream;
 use clap::Parser;
-use repo_stream::{Driver, DriverBuilder, Step};
+use repo_stream::{Driver, DriverBuilder, Output, Step};
 use std::path::PathBuf;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -34,12 +34,16 @@ async fn main() -> Result<()> {
 
     log::info!("got commit: {commit:?}");
 
-    let mut n = 0;
-    while let Step::Value(pairs) = driver.next_chunk(256).await? {
-        n += pairs.len();
-        // log::info!("got {rkey:?}");
+    while let Step::Value(records) = driver.next_chunk(256).await? {
+        for Output { rkey, cid, data } in records {
+            let size = usize::from_ne_bytes(data.try_into().unwrap());
+            print!("0x");
+            for byte in cid.to_bytes() {
+                print!("{byte:>02x}");
+            }
+            println!(": {rkey} => record of len {}", size);
+        }
     }
-    log::info!("bye! total records={n}");
 
     Ok(())
 }
