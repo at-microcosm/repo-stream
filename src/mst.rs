@@ -3,10 +3,7 @@
 //! The primary aim is to work through the **tree** structure. Non-node blocks
 //! are left as raw bytes, for upper levels to parse into DAG-CBOR or whatever.
 
-use crate::{
-    link::{NodeThing, ObjectLink},
-    walk::MstError,
-};
+use crate::link::{NodeThing, ObjectLink, ThingKind};
 use cid::Cid;
 use serde::Deserialize;
 use serde::de::{self, Deserializer, MapAccess, Unexpected, Visitor};
@@ -25,7 +22,7 @@ pub struct Commit {
     /// fixed value of 3 for this repo format version
     pub version: u64,
     /// pointer to the top of the repo contents tree structure (MST)
-    pub data: Cid,
+    pub data: ObjectLink,
     /// revision of the repo, used as a logical clock.
     ///
     /// TID format. Must increase monotonically. Recommend using current
@@ -39,17 +36,9 @@ pub struct Commit {
     /// exist in the CBOR object, but is virtually always null. NOTE: previously
     /// specified as nullable and optional, but this caused interoperability
     /// issues.
-    pub prev: Option<Cid>,
+    pub prev: Option<ObjectLink>,
     /// cryptographic signature of this commit, as raw bytes
-    #[serde(with = "serde_bytes")]
     pub sig: serde_bytes::ByteBuf,
-}
-
-impl Commit {
-    pub fn data_link(&self) -> Result<ObjectLink, MstError> {
-        let strict = self.data.try_into().map_err(MstError::MissingRootNode)?;
-        Ok(ObjectLink::Should(strict))
-    }
 }
 
 #[inline(always)]
@@ -94,14 +83,11 @@ impl<'de> Deserialize<'de> for MstNode {
                                 return Err(de::Error::duplicate_field("l"));
                             }
                             found_left = true;
-                            if let Some(cid) = map.next_value()? {
-                                let Ok(strict) = Cid::try_into(cid) else {
-                                    return Err(de::Error::invalid_value(
-                                        Unexpected::Bytes(&cid.to_bytes()),
-                                        &"a strict atproto sha256 CID link",
-                                    ));
-                                };
-                                left = Some(NodeThing::ChildNode(strict));
+                            if let Some(link) = map.next_value()? {
+                                left = Some(NodeThing {
+                                    link,
+                                    kind: ThingKind::ChildNode,
+                                });
                             }
                         }
                         "e" => {
@@ -142,16 +128,16 @@ impl<'de> Deserialize<'de> for MstNode {
                                     ));
                                 }
 
-                                things.push(NodeThing::Record(rkey_s, entry.value.into()));
+                                things.push(NodeThing {
+                                    link: entry.value.into(),
+                                    kind: ThingKind::Record(rkey_s),
+                                });
 
-                                if let Some(cid) = entry.tree {
-                                    let Ok(strict) = cid.try_into() else {
-                                        return Err(de::Error::invalid_value(
-                                            Unexpected::Bytes(&cid.to_bytes()),
-                                            &"a strict atproto sha256 CID link",
-                                        ));
-                                    };
-                                    things.push(NodeThing::ChildNode(strict));
+                                if let Some(link) = entry.tree {
+                                    things.push(NodeThing {
+                                        link,
+                                        kind: ThingKind::ChildNode,
+                                    });
                                 }
 
                                 prefix = rkey;
@@ -230,5 +216,5 @@ pub(crate) struct Entry {
     /// the lower level must have keys sorting after this TreeEntry's key (to
     /// the "right"), but before the next TreeEntry's key in this Node (if any)
     #[serde(rename = "t")]
-    pub tree: Option<Cid>,
+    pub tree: Option<ObjectLink>,
 }

@@ -234,7 +234,7 @@ impl<R: AsyncRead + Unpin> Driver<R> {
 
         // the commit always must point to a Node; empty node => empty MST special case
         let root_node: MstNode = match mem_blocks
-            .get(&commit.data_link()?)
+            .get(&commit.data)
             .ok_or(DriveError::MissingCommit)?
         {
             MaybeProcessedBlock::Processed(_) => Err(WalkError::BadCommitFingerprint)?,
@@ -381,7 +381,7 @@ impl<R: AsyncRead + Unpin> NeedDisk<R> {
         let commit = self.commit.ok_or(DriveError::MissingCommit)?;
 
         let db_bytes = store
-            .get(&commit.data_link()?.to_bytes())
+            .get(&commit.data.to_bytes())
             .map_err(|e| DriveError::StorageError(DiskError::DbError(e)))?
             .ok_or(DriveError::MissingCommit)?;
 

@@ -1,6 +1,6 @@
 //! Depth-first MST traversal
 
-use crate::link::{NodeThing, ObjectLink};
+use crate::link::{NodeThing, ObjectLink, ThingKind};
 use crate::mst::{Depth, MstNode};
 use crate::{Bytes, HashMap, Rkey, disk::DiskStore, drive::MaybeProcessedBlock, noop};
 use cid::Cid;
@@ -18,14 +18,12 @@ pub enum WalkError {
     #[error("storage error: {0}")]
     StorageError(#[from] fjall::Error),
     #[error("block not found: {0:?}")]
-    MissingBlock(NodeThing),
+    MissingBlock(Box<NodeThing>),
 }
 
 /// Errors from invalid Rkeys
 #[derive(Debug, PartialEq, thiserror::Error)]
 pub enum MstError {
-    #[error("Bad MST root node: {0}")]
-    MissingRootNode(crate::link::NotStrictError),
     #[error("Nodes cannot be empty (except for an entirely empty MST)")]
     EmptyNode,
     #[error("Expected node to be at depth {expected}, but it was at {depth}")]
@@ -75,8 +73,8 @@ impl Walker {
         mpb: &MaybeProcessedBlock,
         process: impl Fn(Bytes) -> Bytes,
     ) -> Result<Option<Output>, WalkError> {
-        match thing {
-            NodeThing::Record(rkey, link) => {
+        match thing.kind {
+            ThingKind::Record(rkey) => {
                 let data = match mpb {
                     MaybeProcessedBlock::Raw(data) => process(data.clone()),
                     MaybeProcessedBlock::Processed(t) => t.clone(),
@@ -93,11 +91,11 @@ impl Walker {
                 log::trace!("val @ {rkey}");
                 Ok(Some(Output {
                     rkey,
-                    cid: link.into(),
+                    cid: thing.link.into(),
                     data,
                 }))
             }
-            NodeThing::ChildNode(_) => {
+            ThingKind::ChildNode => {
                 let MaybeProcessedBlock::Raw(data) = mpb else {
                     return Err(WalkError::BadCommitFingerprint);
                 };
@@ -147,17 +145,18 @@ impl Walker {
         blocks: &HashMap<ObjectLink, MaybeProcessedBlock>,
         process: impl Fn(Bytes) -> Bytes,
     ) -> Result<Step, WalkError> {
-        while let Some(thing) = self.next_todo() {
-            let Some(mpb) = blocks.get(&thing.link()) else {
-                return Err(WalkError::MissingBlock(thing));
+        while let Some(NodeThing { link, kind }) = self.next_todo() {
+            let Some(mpb) = blocks.get(&link) else {
+                return Err(WalkError::MissingBlock(NodeThing { link, kind }.into()));
             };
-            if let Some(out) = self.mpb_step(thing, mpb, &process)? {
+            if let Some(out) = self.mpb_step(NodeThing { link, kind }, mpb, &process)? {
                 return Ok(Step::Value(out));
             }
         }
         Ok(Step::End(None))
     }
 
+    #[allow(dead_code)]
     pub fn step_to_edge(
         &mut self,
         blocks: &HashMap<ObjectLink, MaybeProcessedBlock>,
@@ -166,18 +165,25 @@ impl Walker {
         let mut rkey_prev = None;
         loop {
             match ant.step(blocks, noop) {
-                Err(WalkError::MissingBlock(NodeThing::Record(rkey, _))) => {
-                    // missing record is our game here! keep going,,
-                    // (after checking rkey order bc the error path that got us here skips it)
-                    if let Some(prev) = rkey_prev
-                        && rkey <= prev
-                    {
-                        return Err(WalkError::MstError(MstError::RkeyOutOfOrder { rkey, prev }));
+                Err(WalkError::MissingBlock(thing)) => match *thing {
+                    NodeThing {
+                        kind: ThingKind::Record(rkey),
+                        ..
+                    } => {
+                        if let Some(prev) = rkey_prev
+                            && rkey <= prev
+                        {
+                            return Err(WalkError::MstError(MstError::RkeyOutOfOrder {
+                                rkey,
+                                prev,
+                            }));
+                        }
+                        *self = ant;
+                        ant = self.clone();
+                        rkey_prev = Some(rkey);
                     }
-                    *self = ant;
-                    ant = self.clone();
-                    rkey_prev = Some(rkey);
-                }
+                    _ => return Err(WalkError::MissingBlock(thing)),
+                },
                 Err(anyother) => return Err(anyother),
                 Ok(_) => return Ok(rkey_prev), // oop real record, mutant went too far
             }
@@ -190,12 +196,12 @@ impl Walker {
         blocks: &DiskStore,
         process: impl Fn(Bytes) -> Bytes,
     ) -> Result<Step, WalkError> {
-        while let Some(thing) = self.next_todo() {
-            let Some(block_slice) = blocks.get(&thing.link().to_bytes())? else {
-                return Err(WalkError::MissingBlock(thing));
+        while let Some(NodeThing { link, kind }) = self.next_todo() {
+            let Some(block_slice) = blocks.get(&link.to_bytes())? else {
+                return Err(WalkError::MissingBlock(NodeThing { link, kind }.into()));
             };
             let mpb = MaybeProcessedBlock::from_bytes(block_slice.to_vec());
-            if let Some(out) = self.mpb_step(thing, &mpb, &process)? {
+            if let Some(out) = self.mpb_step(NodeThing { link, kind }, &mpb, &process)? {
                 return Ok(Step::Value(out));
             }
         }
