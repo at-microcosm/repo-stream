@@ -152,47 +152,37 @@ impl Walker {
         Ok(Step::End(None))
     }
 
-    pub fn step_to_slice_edge(
+    #[allow(dead_code)]
+    pub fn edge(
         &mut self,
         blocks: &mut HashMap<Cid, MaybeProcessedBlock>,
     ) -> Result<Option<Rkey>, WalkError> {
         let mut ant = self.clone();
-        let mut ant_prev;
-        let mut rkey_prev = None;
+        let mut rkey_prev: Option<Rkey> = None;
+        let dummy_mpb = MaybeProcessedBlock::Raw(vec![].into());
 
-        loop {
-            ant_prev = ant.clone();
-            ant = ant.clone();
-
-            let Some(NodeThing { cid, kind }) = ant.next_todo() else {
-                return Ok(None);
-            };
-
-            let maybe_mpb = blocks.get(&cid);
-
-            match (&kind, maybe_mpb) {
-                (ThingKind::Value { rkey: _ }, Some(_)) => {
-                    // oops we took a step too far
-                    *self = ant_prev;
-                    return Ok(rkey_prev);
+        while let Some(NodeThing { cid, kind }) = ant.next_todo() {
+            match kind {
+                ThingKind::Tree => {
+                    let mpb = blocks
+                        .get(&cid)
+                        .ok_or_else(|| WalkError::MissingBlock(NodeThing { cid, kind: ThingKind::Tree }))?;
+                    assert!(ant.mpb_step(kind, cid, mpb, noop)?.is_none());
                 }
-                (ThingKind::Value { rkey }, None) => {
-                    if let Some(p) = rkey_prev && *rkey <= p {
-                        return Err(WalkError::MstError(MstError::RkeyOutOfOrder {
-                            rkey: rkey.clone(),
-                            prev: p,
-                        }));
+                ThingKind::Value { ref rkey } => {
+                    if blocks.get(&cid).is_some() {
+                        return Ok(rkey_prev);
                     }
                     rkey_prev = Some(rkey.clone());
+                    assert!(ant.mpb_step(kind, cid, &dummy_mpb, noop)?.is_some());
+
+                    *self = ant;
+                    ant = self.clone();
                 }
-                (ThingKind::Tree, Some(mpb)) => {
-                    ant.mpb_step(kind, cid, mpb, noop)?;
-                }
-                (ThingKind::Tree, None) => {
-                    return Err(WalkError::MissingBlock(NodeThing { cid, kind }));
-                }
-            }
+            };
+
         }
+        Ok(None)
     }
 
     /// blocking!!!!!!
