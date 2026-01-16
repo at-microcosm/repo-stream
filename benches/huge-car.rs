@@ -1,5 +1,5 @@
 extern crate repo_stream;
-use repo_stream::Driver;
+use repo_stream::{Driver, Step};
 use std::path::{Path, PathBuf};
 
 use criterion::{Criterion, criterion_group, criterion_main};
@@ -38,7 +38,7 @@ async fn drive_car(filename: impl AsRef<Path>) -> usize {
     };
 
     let mut n = 0;
-    while let Some(pairs) = driver.next_chunk(256).await.unwrap() {
+    while let Step::Value(pairs) = driver.next_chunk(256).await.unwrap() {
         n += pairs.len();
     }
     n
