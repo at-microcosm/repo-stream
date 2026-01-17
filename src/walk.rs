@@ -164,25 +164,16 @@ impl Walker {
         let mut rkey_prev = None;
         loop {
             match ant.step(blocks, noop) {
-                Err(WalkError::MissingBlock(thing)) => match *thing {
-                    NodeThing {
-                        kind: ThingKind::Record(rkey),
-                        ..
-                    } => {
-                        if let Some(prev) = rkey_prev
-                            && rkey <= prev
-                        {
-                            return Err(WalkError::MstError(MstError::RkeyOutOfOrder {
-                                rkey,
-                                prev,
-                            }));
-                        }
-                        *self = ant;
-                        ant = self.clone();
+                Err(WalkError::MissingBlock(thing)) =>  {
+                    if let NodeThing { kind: ThingKind::Record(rkey), .. } = *thing {
+                        eprintln!("got one: {rkey}");
                         rkey_prev = Some(rkey);
+                    } else {
+                        eprintln!("got a missing child");
                     }
-                    _ => return Err(WalkError::MissingBlock(thing)),
-                },
+                    *self = ant;
+                    ant = self.clone();
+                }
                 Err(anyother) => return Err(anyother),
                 Ok(_) => return Ok(rkey_prev), // oop real record, mutant went too far
             }

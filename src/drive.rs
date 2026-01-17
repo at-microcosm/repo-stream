@@ -240,7 +240,11 @@ impl<R: AsyncRead + Unpin> Driver<R> {
             MaybeProcessedBlock::Processed(_) => Err(WalkError::BadCommitFingerprint)?,
             MaybeProcessedBlock::Raw(bytes) => serde_ipld_dagcbor::from_slice(bytes)?,
         };
-        let walker = Walker::new(root_node);
+        let mut walker = Walker::new(root_node);
+
+        eprintln!("setpping to edge??");
+        let edge = walker.step_to_edge(&mem_blocks)?;
+        eprintln!("got edge: {edge:?}");
 
         Ok(Driver::Memory(
             commit,
