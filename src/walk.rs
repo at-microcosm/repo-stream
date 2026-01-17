@@ -156,7 +156,6 @@ impl Walker {
         Ok(Step::End(None))
     }
 
-    #[allow(dead_code)]
     pub fn step_to_edge(
         &mut self,
         blocks: &HashMap<ObjectLink, MaybeProcessedBlock>,

@@ -1,16 +1,13 @@
 extern crate repo_stream;
 use repo_stream::{Driver, Output, Step};
 
-const EMPTY_CAR: &'static [u8] = include_bytes!("../car-samples/empty.car");
-const TINY_CAR: &'static [u8] = include_bytes!("../car-samples/tiny.car");
-const LITTLE_CAR: &'static [u8] = include_bytes!("../car-samples/little.car");
-const MIDSIZE_CAR: &'static [u8] = include_bytes!("../car-samples/midsize.car");
+const RECORD_SLICE: &'static [u8] = include_bytes!("../car-samples/slice-one.car");
 
-async fn test_car(
+async fn test_car_slice(
     bytes: &[u8],
     expected_records: usize,
     expected_sum: usize,
-    expect_profile: bool,
+    expect_rkey: &str,
 ) {
     let mut driver = match Driver::load_car(
         bytes,
@@ -26,7 +23,7 @@ async fn test_car(
 
     let mut records = 0;
     let mut sum = 0;
-    let mut found_bsky_profile = false;
+    let mut found_expected_rkey = false;
     let mut prev_rkey = "".to_string();
 
     while let Step::Value(pairs) = driver.next_chunk(256).await.unwrap() {
@@ -37,8 +34,8 @@ async fn test_car(
             let size = usize::from_ne_bytes(int_bytes.try_into().unwrap());
 
             sum += size;
-            if rkey == "app.bsky.actor.profile/self" {
-                found_bsky_profile = true;
+            if rkey == expect_rkey {
+                found_expected_rkey = true;
             }
             assert!(rkey > prev_rkey, "rkeys are streamed in order");
             prev_rkey = rkey;
@@ -47,25 +44,10 @@ async fn test_car(
 
     assert_eq!(records, expected_records);
     assert_eq!(sum, expected_sum);
-    assert_eq!(found_bsky_profile, expect_profile);
+    assert!(found_expected_rkey);
 }
 
 #[tokio::test]
-async fn test_empty_car() {
-    test_car(EMPTY_CAR, 0, 0, false).await
-}
-
-#[tokio::test]
-async fn test_tiny_car() {
-    test_car(TINY_CAR, 8, 2071, true).await
-}
-
-#[tokio::test]
-async fn test_little_car() {
-    test_car(LITTLE_CAR, 278, 246960, true).await
-}
-
-#[tokio::test]
-async fn test_midsize_car() {
-    test_car(MIDSIZE_CAR, 11585, 3741393, true).await
+async fn test_record_slice_car() {
+    test_car_slice(RECORD_SLICE, 1, 0, "app.bsky.feed.like/3mcg72x6bi32z").await
 }
