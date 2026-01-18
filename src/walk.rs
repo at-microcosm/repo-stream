@@ -164,12 +164,9 @@ impl Walker {
         let mut rkey_prev = None;
         loop {
             match ant.step(blocks, noop) {
-                Err(WalkError::MissingBlock(thing)) =>  {
-                    if let NodeThing { kind: ThingKind::Record(rkey), .. } = *thing {
-                        eprintln!("got one: {rkey}");
+                Err(WalkError::MissingBlock(thing)) => {
+                    if let ThingKind::Record(rkey) = thing.kind {
                         rkey_prev = Some(rkey);
-                    } else {
-                        eprintln!("got a missing child");
                     }
                     *self = ant;
                     ant = self.clone();

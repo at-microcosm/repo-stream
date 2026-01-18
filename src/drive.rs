@@ -1,6 +1,6 @@
 //! Consume a CAR from an AsyncRead, producing an ordered stream of records
 
-use crate::link::{ObjectLink, NodeThing, ThingKind};
+use crate::link::{NodeThing, ObjectLink, ThingKind};
 use crate::{
     Bytes, HashMap, Rkey, Step,
     disk::{DiskError, DiskStore},
@@ -242,13 +242,11 @@ impl<R: AsyncRead + Unpin> Driver<R> {
         };
         let mut walker = Walker::new(root_node);
 
-        eprintln!("setpping to edge??");
         let edge = walker.step_to_edge(&mem_blocks)?;
-        eprintln!("got edge: {edge:?}");
 
         Ok(Driver::Memory(
             commit,
-            None,
+            edge,
             MemDriver {
                 blocks: mem_blocks,
                 walker,
@@ -298,21 +296,14 @@ impl MemDriver {
         // let mut err;
         for _ in 0..n {
             match self.walker.step(&self.blocks, self.process) {
-                Ok(Step::Value(record)) => {
-                    println!("got one! {record:?}");
-                    out.push(record);
-                },
+                Ok(Step::Value(record)) => out.push(record),
                 Ok(Step::End(None)) => break,
                 Ok(Step::End(_)) => todo!("actually this should be unreachable?"),
                 Err(WalkError::MissingBlock(missing)) => {
-                    eprintln!("got missing so we should be bailing normally now");
                     self.next_missing = Some(*missing);
-                    return Ok(Step::Value(out)) // nb: might be empty!
+                    return Ok(Step::Value(out)); // nb: might be empty!
                 }
-                Err(other) => {
-                    eprintln!("wait we errored??? {other:?}");
-                    return Err(other.into())
-                },
+                Err(other) => return Err(other.into()),
             }
         }
         if out.is_empty() {

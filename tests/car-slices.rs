@@ -7,8 +7,8 @@ async fn test_car_slice(
     bytes: &[u8],
     expected_records: usize,
     expected_sum: usize,
-    expect_rkey: &str,
     expect_preceeding: &str,
+    expect_rkey: &str,
     expect_proceeding: &str,
 ) {
     let (mut driver, before) = match Driver::load_car(
@@ -25,28 +25,36 @@ async fn test_car_slice(
 
     assert_eq!(before, Some(expect_preceeding.into()));
 
-    let mut records = 0;
+    let mut found_records = 0;
     let mut sum = 0;
     let mut found_expected_rkey = false;
     let mut prev_rkey = "".to_string();
 
-    while let Step::Value(pairs) = driver.next_chunk(256).await.unwrap() {
-        for Output { rkey, cid: _, data } in pairs {
-            records += 1;
+    while let Ok(step) = driver.next_chunk(256).await {
+        match step {
+            Step::Value(records) => {
+                for Output { rkey, cid: _, data } in records {
+                    found_records += 1;
 
-            let (int_bytes, _) = data.split_at(size_of::<usize>());
-            let size = usize::from_ne_bytes(int_bytes.try_into().unwrap());
+                    let (int_bytes, _) = data.split_at(size_of::<usize>());
+                    let size = usize::from_ne_bytes(int_bytes.try_into().unwrap());
 
-            sum += size;
-            if rkey == expect_rkey {
-                found_expected_rkey = true;
+                    sum += size;
+                    if rkey == expect_rkey {
+                        found_expected_rkey = true;
+                    }
+                    assert!(rkey > prev_rkey, "rkeys are streamed in order");
+                    prev_rkey = rkey;
+                }
             }
-            assert!(rkey > prev_rkey, "rkeys are streamed in order");
-            prev_rkey = rkey;
+            Step::End(proceeding) => {
+                assert_eq!(proceeding, Some(expect_proceeding.into()));
+                break;
+            }
         }
     }
 
-    assert_eq!(records, expected_records);
+    assert_eq!(found_records, expected_records);
     assert_eq!(sum, expected_sum);
     assert!(found_expected_rkey);
 }
@@ -57,8 +65,9 @@ async fn test_record_slice_car() {
         RECORD_SLICE,
         1,
         212,
+        "app.bsky.feed.like/3mcfzfbpaml27",
         "app.bsky.feed.like/3mcg72x6bi32z",
-        "",
-        "",
-    ).await
+        "app.bsky.feed.like/3mcga2o2efq27",
+    )
+    .await
 }
