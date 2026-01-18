@@ -8,8 +8,10 @@ async fn test_car_slice(
     expected_records: usize,
     expected_sum: usize,
     expect_rkey: &str,
+    expect_preceeding: &str,
+    expect_proceeding: &str,
 ) {
-    let mut driver = match Driver::load_car(
+    let (mut driver, before) = match Driver::load_car(
         bytes,
         |block| block.len().to_ne_bytes().to_vec(),
         10, /* MiB */
@@ -17,9 +19,11 @@ async fn test_car_slice(
     .await
     .unwrap()
     {
-        Driver::Memory(_commit, _, mem_driver) => mem_driver,
+        Driver::Memory(_commit, before, mem_driver) => (mem_driver, before),
         Driver::Disk(_) => panic!("too big"),
     };
+
+    assert_eq!(before, Some(expect_preceeding.into()));
 
     let mut records = 0;
     let mut sum = 0;
@@ -49,5 +53,12 @@ async fn test_car_slice(
 
 #[tokio::test]
 async fn test_record_slice_car() {
-    test_car_slice(RECORD_SLICE, 1, 0, "app.bsky.feed.like/3mcg72x6bi32z").await
+    test_car_slice(
+        RECORD_SLICE,
+        1,
+        212,
+        "app.bsky.feed.like/3mcg72x6bi32z",
+        "",
+        "",
+    ).await
 }
