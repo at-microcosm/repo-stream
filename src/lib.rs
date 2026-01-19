@@ -94,7 +94,11 @@ pub type Bytes = Vec<u8>;
 
 pub type Rkey = String;
 
+#[cfg(feature = "hashbrown")]
 pub(crate) use hashbrown::HashMap;
+
+#[cfg(not(feature = "hashbrown"))]
+pub(crate) use std::collections::HashMap;
 
 #[doc = include_str!("../readme.md")]
 #[cfg(doctest)]
