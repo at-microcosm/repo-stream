@@ -2,17 +2,19 @@ extern crate repo_stream;
 use repo_stream::{Driver, Output, Step};
 
 const RECORD_SLICE: &'static [u8] = include_bytes!("../car-samples/slice-one.car");
-const RECORD_NODE_BEFORE: &'static [u8] = include_bytes!("../car-samples/slice-node-before.car");
+const RECORD_NODE_FIRST_KEY: &'static [u8] =
+    include_bytes!("../car-samples/slice-node-first-key.car");
 const RECORD_NODE_AFTER: &'static [u8] = include_bytes!("../car-samples/slice-node-after.car");
-// TODO: absense proof (zero records in slice)
+const RECORD_NODE_ABSENT: &'static [u8] =
+    include_bytes!("../car-samples/slice-proving-absence.car");
 
 async fn test_car_slice(
     bytes: &[u8],
     expected_records: usize,
     expected_sum: usize,
-    expect_preceeding: &str,
-    expect_rkey: &str,
-    expect_proceeding: &str,
+    expect_preceeding: Option<&str>,
+    expect_rkey: Option<&str>,
+    expect_proceeding: Option<&str>,
 ) {
     let (mut driver, before) = match Driver::load_car(
         bytes,
@@ -26,7 +28,7 @@ async fn test_car_slice(
         Driver::Disk(_) => panic!("too big"),
     };
 
-    assert_eq!(before, Some(expect_preceeding.into()));
+    assert_eq!(before.as_deref(), expect_preceeding);
 
     let mut found_records = 0;
     let mut sum = 0;
@@ -43,23 +45,28 @@ async fn test_car_slice(
                     let size = usize::from_ne_bytes(int_bytes.try_into().unwrap());
 
                     sum += size;
-                    if rkey == expect_rkey {
+                    if Some(rkey.as_str()) == expect_rkey {
                         found_expected_rkey = true;
                     }
+                    eprintln!("!!!! {rkey}");
                     assert!(rkey > prev_rkey, "rkeys are streamed in order");
                     prev_rkey = rkey;
                 }
             }
             Step::End(proceeding) => {
-                assert_eq!(proceeding, Some(expect_proceeding.into()));
+                assert_eq!(proceeding.as_deref(), expect_proceeding);
                 break;
             }
         }
     }
 
     assert_eq!(found_records, expected_records);
-    assert_eq!(sum, expected_sum);
-    assert!(found_expected_rkey);
+    if expected_records > 0 {
+        assert!(found_expected_rkey);
+        assert_eq!(sum, expected_sum);
+    } else {
+        assert!(!found_expected_rkey);
+    }
 }
 
 #[tokio::test]
@@ -68,16 +75,24 @@ async fn test_record_slice_car() {
         RECORD_SLICE,
         1,
         212,
-        "app.bsky.feed.like/3mcfzfbpaml27",
-        "app.bsky.feed.like/3mcg72x6bi32z",
-        "app.bsky.feed.like/3mcga2o2efq27",
+        Some("app.bsky.feed.like/3mcfzfbpaml27"),
+        Some("app.bsky.feed.like/3mcg72x6bi32z"),
+        Some("app.bsky.feed.like/3mcga2o2efq27"),
     )
     .await
 }
 
 #[tokio::test]
-async fn test_record_slice_node_before() {
-    test_car_slice(RECORD_NODE_BEFORE, 1, 212, "", "", "").await
+async fn test_record_slice_node_first_key() {
+    test_car_slice(
+        RECORD_NODE_FIRST_KEY,
+        1,
+        212,
+        None,
+        Some("app.bsky.feed.like/3lohfzs6qea24"),
+        Some("app.bsky.feed.post/3m72vlnelw227"),
+    )
+    .await
 }
 
 #[tokio::test]
@@ -86,9 +101,24 @@ async fn test_record_slice_node_after() {
         RECORD_NODE_AFTER,
         1,
         212,
-        "app.bsky.feed.like/3mbzi6ttskp2c",
-        "",
-        "",
+        Some("app.bsky.feed.like/3mbzi6ttskp2c"),
+        Some("app.bsky.feed.like/3mcqqwzsc7x26"),
+        Some("app.bsky.feed.post/3lbn6of6qxc2a"),
+    )
+    .await
+}
+
+#[tokio::test]
+async fn test_record_slice_proving_absence() {
+    // missing key is `app.bsky.feed.like/3lohfzs6qea23`
+    // NOTE: repo-stream output here isn't enough info for proof
+    test_car_slice(
+        RECORD_NODE_ABSENT,
+        0,
+        0,
+        Some("app.bsky.feed.post/3m72vlnelw227"),
+        None,
+        None,
     )
     .await
 }

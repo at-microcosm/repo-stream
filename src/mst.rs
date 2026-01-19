@@ -47,7 +47,7 @@ pub fn atproto_mst_depth(key: &str) -> Depth {
     u128::from_be_bytes(Sha256::digest(key).split_at(16).0.try_into().unwrap()).leading_zeros() / 2
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct MstNode {
     pub depth: Option<Depth>, // known for nodes with entries (required for root)
     pub things: Vec<NodeThing>,

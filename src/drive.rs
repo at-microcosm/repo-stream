@@ -242,7 +242,9 @@ impl<R: AsyncRead + Unpin> Driver<R> {
         };
         let mut walker = Walker::new(root_node);
 
+        // eprintln!("going to edge...");
         let edge = walker.step_to_edge(&mem_blocks)?;
+        // eprintln!("got edge? {edge:?}");
 
         Ok(Driver::Memory(
             commit,
@@ -274,14 +276,28 @@ impl<R: AsyncRead + Unpin> Driver<R> {
 pub struct MemDriver {
     blocks: HashMap<ObjectLink, MaybeProcessedBlock>,
     walker: Walker,
-    process: fn(Bytes) -> Bytes,
+    process: fn(Bytes) -> Bytes, // TODO: impl Fn(bytes) -> Bytes?
     next_missing: Option<NodeThing>,
 }
 
 impl MemDriver {
+    pub fn viz(&self, tree: ObjectLink) -> Result<(), WalkError> {
+        self.walker.viz(&self.blocks, tree)
+    }
     /// Step through the record outputs, in rkey order
     pub async fn next_chunk(&mut self, n: usize) -> Result<Step<BlockChunk>, DriveError> {
-        if let Some(missing) = &self.next_missing {
+        if let Some(ref mut missing) = self.next_missing {
+            while let Step::Value(sparse_out) =
+                self.walker.step_sparse(&self.blocks, self.process)?
+            {
+                if missing.kind == ThingKind::ChildNode {
+                    *missing = NodeThing {
+                        link: sparse_out.cid.into(),
+                        kind: ThingKind::Record(sparse_out.rkey),
+                    };
+                }
+            }
+            // TODO: l asdflkja slfkja lkdfj lakjd f
             // TODO: make the walker finish walking to verify no more present blocks (oops sparse tree)
             // HACK: just get the last rkey if it's there -- i think we might actually need to walk for it though
             // ...and walk to verify rkey order of the rest of the nodes anyway?

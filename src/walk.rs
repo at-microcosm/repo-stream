@@ -35,11 +35,13 @@ pub enum MstError {
 }
 
 /// Walker outputs
+///
+/// TODO: rename to "Record" or "Entry" or something
 #[derive(Debug, PartialEq)]
-pub struct Output {
-    pub rkey: Rkey,
+pub struct Output<T = Bytes> {
+    pub rkey: Rkey, // TODO: aaa it's not really rkey, it's just "key" (or split to collection/rkey??)
     pub cid: Cid,
-    pub data: Bytes,
+    pub data: T,
 }
 
 #[derive(Debug, PartialEq)]
@@ -65,6 +67,129 @@ impl Walker {
             root_depth: root_node.depth.unwrap_or(0), // empty root node = empty mst
             todo: vec![root_node.things],
         }
+    }
+
+    pub fn viz(
+        &self,
+        blocks: &HashMap<ObjectLink, MaybeProcessedBlock>,
+        root_link: ObjectLink,
+    ) -> Result<(), WalkError> {
+        let root_block = blocks.get(&root_link).ok_or(WalkError::MissingBlock(
+            NodeThing {
+                link: root_link.clone(),
+                kind: ThingKind::ChildNode,
+            }
+            .into(),
+        ))?;
+
+        let root_node: MstNode = match root_block {
+            MaybeProcessedBlock::Processed(_) => return Err(WalkError::BadCommitFingerprint),
+            MaybeProcessedBlock::Raw(bytes) => serde_ipld_dagcbor::from_slice(bytes)?,
+        };
+
+        let mut positions = HashMap::new();
+        let mut w = Walker::new(root_node.clone());
+
+        let mut pos_idx = 0;
+        while let Step::Value(Output { rkey, .. }) = w.step_sparse(blocks, noop)? {
+            positions.insert(rkey, pos_idx);
+            pos_idx += 1;
+        }
+
+        Self::vnext(
+            root_node.depth.unwrap(),
+            vec![root_link],
+            blocks,
+            &positions,
+        )?;
+
+        Ok(())
+    }
+
+    pub fn vnext(
+        level: u32,
+        links: Vec<ObjectLink>,
+        blocks: &HashMap<ObjectLink, MaybeProcessedBlock>,
+        positions: &HashMap<Rkey, usize>,
+    ) -> Result<Vec<usize>, WalkError> {
+        let mut offsets = Vec::new();
+        let mut level_keys = Vec::new();
+        let mut child_links = Vec::new();
+
+        for link in links {
+            println!(
+                "\n{level}~{}..",
+                link.to_bytes()
+                    .iter()
+                    .take(5)
+                    .map(|c| format!("{c:02x}"))
+                    .collect::<Vec<_>>()
+                    .join("")
+            );
+
+            let Some(mpb) = blocks.get(&link) else {
+                // TODO: drop an 'x' for missing node
+                continue;
+            };
+            let node: MstNode = match mpb {
+                MaybeProcessedBlock::Processed(_) => return Err(WalkError::BadCommitFingerprint),
+                MaybeProcessedBlock::Raw(bytes) => serde_ipld_dagcbor::from_slice(bytes)?,
+            };
+
+            let mut last_key = "".to_string();
+            let mut last_was_record = true;
+            for thing in node.things {
+                let mut node_keys = Vec::new();
+
+                let has = blocks.contains_key(&thing.link);
+
+                match thing.kind {
+                    ThingKind::ChildNode => {
+                        if has {
+                            child_links.push(thing.link);
+                            last_was_record = false;
+                        }
+                    }
+                    ThingKind::Record(key) => {
+                        let us = positions[&key];
+
+                        if !last_was_record && last_key.is_empty() {
+                            let them = positions[&last_key];
+                            for i in 0..(them - 1) {
+                                if i < (us + 1) {
+                                    print!("  ");
+                                } else {
+                                    print!("~~");
+                                }
+                            }
+                            println!("~");
+                        }
+
+                        for _ in 0..us {
+                            print!("  ");
+                        }
+                        if has {
+                            print!("O");
+                        } else {
+                            print!("x");
+                        }
+                        println!(" {key}");
+                        node_keys.push(key.clone());
+                        last_key = key;
+                        last_was_record = true;
+                    }
+                }
+                level_keys.push(node_keys);
+            }
+
+            offsets.push(1);
+        }
+
+        if !child_links.is_empty() {
+            Self::vnext(level - 1, child_links, blocks, positions)?; // TODO use offsets
+        }
+
+        Ok(offsets)
     }
 
     fn mpb_step(
@@ -156,6 +281,39 @@ impl Walker {
         Ok(Step::End(None))
     }
 
+    /// Advance through nodes, allowing for missing records
+    pub fn step_sparse(
+        &mut self,
+        blocks: &HashMap<ObjectLink, MaybeProcessedBlock>,
+        process: impl Fn(Bytes) -> Bytes,
+    ) -> Result<Step<Output<Option<Bytes>>>, WalkError> {
+        while let Some(NodeThing { link, kind }) = self.next_todo() {
+            let mut dummy = false;
+            let mpb = match blocks.get(&link) {
+                Some(mpb) => mpb,
+                None => {
+                    if let ThingKind::Record(_) = kind {
+                        dummy = true;
+                        &MaybeProcessedBlock::Processed(vec![])
+                    } else {
+                        continue;
+                    }
+                }
+            };
+            if let Some(out) = self.mpb_step(NodeThing { link, kind }, mpb, |bytes| {
+                if dummy { bytes } else { process(bytes) }
+            })? {
+                // eprintln!(" ----- {}", out.rkey);
+                return Ok(Step::Value(Output {
+                    cid: out.cid,
+                    rkey: out.rkey,
+                    data: if dummy { None } else { Some(out.data) },
+                }));
+            }
+        }
+        Ok(Step::End(None))
+    }
+
     pub fn step_to_edge(
         &mut self,
         blocks: &HashMap<ObjectLink, MaybeProcessedBlock>,
@@ -172,7 +330,10 @@ impl Walker {
                     ant = self.clone();
                 }
                 Err(anyother) => return Err(anyother),
-                Ok(_) => return Ok(rkey_prev), // oop real record, mutant went too far
+                Ok(z) => {
+                    eprintln!("apparently we are too far at {z:?}");
+                    return Ok(rkey_prev); // oop real record, mutant went too far
+                }
             }
         }
     }
