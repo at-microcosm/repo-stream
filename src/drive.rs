@@ -282,7 +282,6 @@ impl MemDriver {
     /// Step through the record outputs, in rkey order
     pub async fn next_chunk(&mut self, n: usize) -> Result<Step<BlockChunk>, DriveError> {
         if let Some(missing) = &self.next_missing {
-            println!("other side???");
             // TODO: make the walker finish walking to verify no more present blocks (oops sparse tree)
             // HACK: just get the last rkey if it's there -- i think we might actually need to walk for it though
             // ...and walk to verify rkey order of the rest of the nodes anyway?
@@ -291,7 +290,6 @@ impl MemDriver {
                 ThingKind::Record(rkey) => Step::End(Some(rkey.clone())),
             });
         }
-        println!("stepping in...");
         let mut out = Vec::with_capacity(n);
         // let mut err;
         for _ in 0..n {

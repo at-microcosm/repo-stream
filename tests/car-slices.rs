@@ -2,6 +2,9 @@ extern crate repo_stream;
 use repo_stream::{Driver, Output, Step};
 
 const RECORD_SLICE: &'static [u8] = include_bytes!("../car-samples/slice-one.car");
+const RECORD_NODE_BEFORE: &'static [u8] = include_bytes!("../car-samples/slice-node-before.car");
+const RECORD_NODE_AFTER: &'static [u8] = include_bytes!("../car-samples/slice-node-after.car");
+// TODO: absense proof (zero records in slice)
 
 async fn test_car_slice(
     bytes: &[u8],
@@ -68,6 +71,24 @@ async fn test_record_slice_car() {
         "app.bsky.feed.like/3mcfzfbpaml27",
         "app.bsky.feed.like/3mcg72x6bi32z",
         "app.bsky.feed.like/3mcga2o2efq27",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn test_record_slice_node_before() {
+    test_car_slice(RECORD_NODE_BEFORE, 1, 212, "", "", "").await
+}
+
+#[tokio::test]
+async fn test_record_slice_node_after() {
+    test_car_slice(
+        RECORD_NODE_AFTER,
+        1,
+        212,
+        "app.bsky.feed.like/3mbzi6ttskp2c",
+        "",
+        "",
     )
     .await
 }
