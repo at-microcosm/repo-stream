@@ -1,6 +1,6 @@
+use cid::Cid;
 use criterion::{Criterion, criterion_group, criterion_main};
 use multihash_codetable::{Code, MultihashDigest};
-use cid::Cid;
 use sha2::{Digest, Sha256};
 
 fn multihash_verify(given: Cid, block: &[u8]) -> bool {
@@ -30,9 +30,15 @@ pub fn criterion_benchmark(c: &mut Criterion) {
     let cid = Cid::new_v1(0x71, Code::Sha2_256.digest(&some_bytes));
 
     let mut g = c.benchmark_group("CID check");
-    g.bench_function("multihash", |b| b.iter(|| multihash_verify(cid, &some_bytes)));
-    g.bench_function("effortful", |b| b.iter(|| effortful_verify(cid, &some_bytes)));
-    g.bench_function("fastloose", |b| b.iter(|| fastloose_verify(cid, &some_bytes)));
+    g.bench_function("multihash", |b| {
+        b.iter(|| multihash_verify(cid, &some_bytes))
+    });
+    g.bench_function("effortful", |b| {
+        b.iter(|| effortful_verify(cid, &some_bytes))
+    });
+    g.bench_function("fastloose", |b| {
+        b.iter(|| fastloose_verify(cid, &some_bytes))
+    });
 }
 
 criterion_group!(benches, criterion_benchmark);

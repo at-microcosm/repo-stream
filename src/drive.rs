@@ -1,6 +1,5 @@
 //! Consume a CAR from an AsyncRead, producing an ordered stream of records
 
-use multihash_codetable::{MultihashDigest, Code};
 use crate::{
     Bytes, HashMap,
     disk::{DiskError, DiskStore},
@@ -9,6 +8,7 @@ use crate::{
 };
 use cid::Cid;
 use iroh_car::CarReader;
+use multihash_codetable::{Code, MultihashDigest};
 use std::convert::Infallible;
 use tokio::{io::AsyncRead, sync::mpsc};
 
@@ -205,7 +205,6 @@ impl<R: AsyncRead + Unpin> Driver<R> {
         // try to load all the blocks into memory
         let mut mem_size = 0;
         while let Some((cid, data)) = car.next_block().await? {
-
             // lkasdjflkajdsflkajsfdlkjasdf
             if !verify_block(cid, &data) {
                 return Err(DriveError::BadCID);
