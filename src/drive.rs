@@ -19,6 +19,8 @@ use crate::walk::{WalkError, Walker};
 pub enum DriveError {
     #[error("Error from iroh_car: {0}")]
     CarReader(#[from] iroh_car::Error),
+    #[error("Block did not match its CID")]
+    BadCID,
     #[error("Failed to decode commit block: {0}")]
     BadBlock(#[from] serde_ipld_dagcbor::DecodeError<Infallible>),
     #[error("The Commit block reference by the root was not found")]
@@ -196,6 +198,12 @@ impl<R: AsyncRead + Unpin> Driver<R> {
         // try to load all the blocks into memory
         let mut mem_size = 0;
         while let Some((cid, data)) = car.next_block().await? {
+
+            // lkasdjflkajdsflkajsfdlkjasdf
+            if !verify_block(cid, &data) {
+                return Err(DriveError::BadCID);
+            }
+
             // the root commit is a Special Third Kind of block that we need to make
             // sure not to optimistically send to the processing function
             if cid == root {
@@ -295,6 +303,13 @@ pub struct NeedDisk<R: AsyncRead + Unpin> {
     pub commit: Option<Commit>,
 }
 
+fn verify_block(given: Cid, block: &[u8]) -> bool {
+    use multihash_codetable::{Code, MultihashDigest};
+    const RAW: u64 = 0x71;
+    let calculated = cid::Cid::new_v1(RAW, Code::Sha2_256.digest(block));
+    calculated == given
+}
+
 impl<R: AsyncRead + Unpin> NeedDisk<R> {
     pub async fn finish_loading(
         mut self,
@@ -334,6 +349,12 @@ impl<R: AsyncRead + Unpin> NeedDisk<R> {
                 let Some((cid, data)) = self.car.next_block().await? else {
                     break;
                 };
+
+                // lkasdjflkajdsflkajsfdlkjasdf
+                if !verify_block(cid, &data) {
+                    return Err(DriveError::BadCID);
+                }
+
                 // we still gotta keep checking for the root since we might not have it
                 if cid == self.root {
                     let c: Commit = serde_ipld_dagcbor::from_slice(&data)?;
