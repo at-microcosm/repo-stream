@@ -10,6 +10,7 @@ use cid::Cid;
 use iroh_car::CarReader;
 use std::convert::Infallible;
 use tokio::{io::AsyncRead, sync::mpsc};
+use sha2::{Digest, Sha256};
 
 use crate::mst::Commit;
 use crate::walk::{WalkError, Walker};
@@ -304,10 +305,15 @@ pub struct NeedDisk<R: AsyncRead + Unpin> {
 }
 
 fn verify_block(given: Cid, block: &[u8]) -> bool {
-    use multihash_codetable::{Code, MultihashDigest};
-    const RAW: u64 = 0x71;
-    let calculated = cid::Cid::new_v1(RAW, Code::Sha2_256.digest(block));
-    calculated == given
+    // we know we're in atproto, so we can make a few assumptions
+    if given.version() != cid::Version::V1 {
+        return false;
+    }
+    let (codec, given_digest, _) = given.hash().into_inner();
+    if codec != 0x12 {
+        return false;
+    }
+    given_digest[..32] == *Sha256::digest(block)
 }
 
 impl<R: AsyncRead + Unpin> NeedDisk<R> {
