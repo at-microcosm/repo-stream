@@ -48,3 +48,7 @@ harness = false
 # [[bench]]
 # name = "leading"
 # harness = false
+
+[[bench]]
+name = "cid-check"
+harness = false

@@ -1,5 +1,6 @@
 //! Consume a CAR from an AsyncRead, producing an ordered stream of records
 
+use multihash_codetable::{MultihashDigest, Code};
 use crate::{
     Bytes, HashMap,
     disk::{DiskError, DiskStore},
@@ -10,7 +11,6 @@ use cid::Cid;
 use iroh_car::CarReader;
 use std::convert::Infallible;
 use tokio::{io::AsyncRead, sync::mpsc};
-use sha2::{Digest, Sha256};
 
 use crate::mst::Commit;
 use crate::walk::{WalkError, Walker};
@@ -122,6 +122,12 @@ pub enum Driver<R: AsyncRead + Unpin> {
 #[inline]
 pub fn noop(block: Bytes) -> Bytes {
     block
+}
+
+// iroh-car doesn't verify CIDs!!!!!!
+#[inline(always)]
+fn verify_block(given: Cid, block: &[u8]) -> bool {
+    Cid::new_v1(0x71, Code::Sha2_256.digest(block)) == given
 }
 
 /// Builder-style driver setup
@@ -302,18 +308,6 @@ pub struct NeedDisk<R: AsyncRead + Unpin> {
     max_size: usize,
     mem_blocks: HashMap<Cid, MaybeProcessedBlock>,
     pub commit: Option<Commit>,
-}
-
-fn verify_block(given: Cid, block: &[u8]) -> bool {
-    // we know we're in atproto, so we can make a few assumptions
-    if given.version() != cid::Version::V1 {
-        return false;
-    }
-    let (codec, given_digest, _) = given.hash().into_inner();
-    if codec != 0x12 {
-        return false;
-    }
-    given_digest[..32] == *Sha256::digest(block)
 }
 
 impl<R: AsyncRead + Unpin> NeedDisk<R> {
