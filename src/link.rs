@@ -21,7 +21,7 @@ impl From<ObjectLink> for Cid {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct NodeThing {
     pub link: ObjectLink,
     pub kind: ThingKind,

@@ -7,6 +7,7 @@ use crate::{
     mst::MstNode,
     walk::{MstError, Output},
 };
+use std::collections::BTreeMap;
 use cid::Cid;
 use iroh_car::CarReader;
 use std::convert::Infallible;
@@ -46,7 +47,7 @@ impl From<MstError> for DriveError {
 pub type BlockChunk = Vec<Output>;
 
 #[derive(Debug, Clone)]
-pub(crate) enum MaybeProcessedBlock {
+pub enum MaybeProcessedBlock {
     /// A block that's *probably* a Node (but we can't know yet)
     ///
     /// It *can be* a record that suspiciously looks a lot like a node, so we
@@ -72,6 +73,21 @@ pub(crate) enum MaybeProcessedBlock {
 }
 
 impl MaybeProcessedBlock {
+    pub fn to_node(&self) -> Option<MstNode> {
+        let Self::Raw(bytes) = self else {
+            return None;
+        };
+        serde_ipld_dagcbor::from_slice(bytes).ok()
+    }
+    pub fn unknown_depth(&self) -> bool {
+        let Self::Raw(bytes) = self else {
+            return false;
+        };
+        let Ok(node) = serde_ipld_dagcbor::from_slice::<MstNode>(bytes) else {
+            return false;
+        };
+        node.depth.is_none()
+    }
     pub(crate) fn maybe(process: fn(Bytes) -> Bytes, data: Bytes) -> Self {
         if MstNode::could_be(&data) {
             MaybeProcessedBlock::Raw(data)
@@ -169,9 +185,64 @@ impl DriverBuilder {
     pub async fn load_car<R: AsyncRead + Unpin>(&self, reader: R) -> Result<Driver<R>, DriveError> {
         Driver::load_car(reader, self.block_processor, self.mem_limit_mb).await
     }
+
+    /// Begin processing an atproto MST from a CAR file
+    pub async fn count_entries<R: AsyncRead + Unpin>(&self, reader: R) -> Result<Option<BTreeMap<usize, usize>>, DriveError> {
+        Driver::count_entries(reader).await
+    }
 }
 
 impl<R: AsyncRead + Unpin> Driver<R> {
+    pub async fn count_entries(
+        reader: R,
+    ) -> Result<Option<BTreeMap<usize, usize>>, DriveError> {
+        let mut mem_blocks: HashMap<ObjectLink, _> = HashMap::new();
+
+        let mut car = CarReader::new(reader).await?;
+
+        let roots = car.header().roots();
+        assert_eq!(roots.len(), 1);
+
+        let root = *roots.first().ok_or(DriveError::MissingRoot)?;
+        log::debug!("root: {root:?}");
+
+        let mut commit = None;
+
+
+        // try to load all the blocks into memory
+        while let Some((cid, data)) = car.next_block().await? {
+            // the root commit is a Special Third Kind of block that we need to make
+            // sure not to optimistically send to the processing function
+            if cid == root {
+                let c: Commit = serde_ipld_dagcbor::from_slice(&data)?;
+                commit = Some(c);
+                continue;
+            }
+            let maybe_processed = MaybeProcessedBlock::maybe(|_| vec![], data);
+
+            // stash (maybe processed) blocks in memory as long as we have room
+            mem_blocks.insert(cid.into(), maybe_processed);
+        }
+
+        let commit = commit.ok_or(DriveError::MissingCommit)?;
+
+        // the commit always must point to a Node; empty node => empty MST special case
+        let root_node: MstNode = match mem_blocks
+            .get(&commit.data)
+            .ok_or(DriveError::MissingCommit)?
+        {
+            MaybeProcessedBlock::Processed(_) => Err(WalkError::BadCommitFingerprint)?,
+            MaybeProcessedBlock::Raw(bytes) => serde_ipld_dagcbor::from_slice(bytes)?,
+        };
+
+        if root_node.depth.unwrap_or(0) < 4 {
+            return Ok(None);
+        }
+
+        let mut walker = Walker::new(root_node);
+        Ok(Some(walker.count_entries(&mut mem_blocks)?))
+    }
+
     /// Begin processing an atproto MST from a CAR file
     ///
     /// Blocks will be loaded, processed, and buffered in memory. If the entire
@@ -186,16 +257,17 @@ impl<R: AsyncRead + Unpin> Driver<R> {
         process: fn(Bytes) -> Bytes,
         mem_limit_mb: usize,
     ) -> Result<Driver<R>, DriveError> {
+        let mut block_count = 0;
+
         let max_size = mem_limit_mb * 2_usize.pow(20);
         let mut mem_blocks = HashMap::new();
 
         let mut car = CarReader::new(reader).await?;
 
-        let root = *car
-            .header()
-            .roots()
-            .first()
-            .ok_or(DriveError::MissingRoot)?;
+        let roots = car.header().roots();
+        assert_eq!(roots.len(), 1);
+
+        let root = *roots.first().ok_or(DriveError::MissingRoot)?;
         log::debug!("root: {root:?}");
 
         let mut commit = None;
@@ -203,6 +275,7 @@ impl<R: AsyncRead + Unpin> Driver<R> {
         // try to load all the blocks into memory
         let mut mem_size = 0;
         while let Some((cid, data)) = car.next_block().await? {
+            block_count += 1;
             // the root commit is a Special Third Kind of block that we need to make
             // sure not to optimistically send to the processing function
             if cid == root {
@@ -218,6 +291,8 @@ impl<R: AsyncRead + Unpin> Driver<R> {
             mem_size += maybe_processed.len();
             mem_blocks.insert(cid.into(), maybe_processed);
             if mem_size >= max_size {
+                log::debug!("blocks loaded before disk needed: {block_count}");
+
                 return Ok(Driver::Disk(NeedDisk {
                     car,
                     root,
@@ -228,6 +303,8 @@ impl<R: AsyncRead + Unpin> Driver<R> {
                 }));
             }
         }
+
+        log::debug!("blocks: {block_count}");
 
         // all blocks loaded and we fit in memory! hopefully we found the commit...
         let commit = commit.ok_or(DriveError::MissingCommit)?;
@@ -274,7 +351,7 @@ impl<R: AsyncRead + Unpin> Driver<R> {
 /// so the sync/async boundaries become a little easier to work around.
 #[derive(Debug)]
 pub struct MemDriver {
-    blocks: HashMap<ObjectLink, MaybeProcessedBlock>,
+    pub blocks: HashMap<ObjectLink, MaybeProcessedBlock>,
     walker: Walker,
     process: fn(Bytes) -> Bytes, // TODO: impl Fn(bytes) -> Bytes?
     next_missing: Option<NodeThing>,

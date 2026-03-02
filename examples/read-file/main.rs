@@ -24,6 +24,7 @@ async fn main() -> Result<()> {
     let reader = tokio::io::BufReader::new(reader);
 
     let (commit, mut driver) = match DriverBuilder::new()
+        .with_mem_limit_mb(1000)
         .with_block_processor(|block| block.len().to_ne_bytes().to_vec())
         .load_car(reader)
         .await?
@@ -36,12 +37,12 @@ async fn main() -> Result<()> {
 
     while let Step::Value(records) = driver.next_chunk(256).await? {
         for Output { rkey, cid, data } in records {
-            let size = usize::from_ne_bytes(data.try_into().unwrap());
-            print!("0x");
-            for byte in cid.to_bytes() {
-                print!("{byte:>02x}");
-            }
-            println!(": {rkey} => record of len {}", size);
+            // let size = usize::from_ne_bytes(data.try_into().unwrap());
+            // print!("0x");
+            // for byte in cid.to_bytes() {
+            //     print!("{byte:>02x}");
+            // }
+            // println!(": {rkey} => record of len {}", size);
         }
     }
 

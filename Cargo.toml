@@ -32,6 +32,7 @@ tempfile = "3.23.0"
 tokio = { version = "1.47.1", features = ["full"] }
 mimalloc = "0.1.48"
 hmac-sha256 = "1.1.12"
+async-channel = "2.5.0"
 
 [profile.profiling]
 inherits = "release"

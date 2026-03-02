@@ -48,7 +48,7 @@ pub fn atproto_mst_depth(key: &str) -> Depth {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct MstNode {
+pub struct MstNode {
     pub depth: Option<Depth>, // known for nodes with entries (required for root)
     pub things: Vec<NodeThing>,
 }
