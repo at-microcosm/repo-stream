@@ -7,7 +7,6 @@ use crate::{
     mst::MstNode,
     walk::{MstError, Output},
 };
-use std::collections::BTreeMap;
 use cid::Cid;
 use iroh_car::CarReader;
 use std::convert::Infallible;
@@ -185,63 +184,9 @@ impl DriverBuilder {
     pub async fn load_car<R: AsyncRead + Unpin>(&self, reader: R) -> Result<Driver<R>, DriveError> {
         Driver::load_car(reader, self.block_processor, self.mem_limit_mb).await
     }
-
-    /// Begin processing an atproto MST from a CAR file
-    pub async fn count_entries<R: AsyncRead + Unpin>(&self, reader: R) -> Result<Option<BTreeMap<usize, usize>>, DriveError> {
-        Driver::count_entries(reader).await
-    }
 }
 
 impl<R: AsyncRead + Unpin> Driver<R> {
-    pub async fn count_entries(
-        reader: R,
-    ) -> Result<Option<BTreeMap<usize, usize>>, DriveError> {
-        let mut mem_blocks: HashMap<ObjectLink, _> = HashMap::new();
-
-        let mut car = CarReader::new(reader).await?;
-
-        let roots = car.header().roots();
-        assert_eq!(roots.len(), 1);
-
-        let root = *roots.first().ok_or(DriveError::MissingRoot)?;
-        log::debug!("root: {root:?}");
-
-        let mut commit = None;
-
-
-        // try to load all the blocks into memory
-        while let Some((cid, data)) = car.next_block().await? {
-            // the root commit is a Special Third Kind of block that we need to make
-            // sure not to optimistically send to the processing function
-            if cid == root {
-                let c: Commit = serde_ipld_dagcbor::from_slice(&data)?;
-                commit = Some(c);
-                continue;
-            }
-            let maybe_processed = MaybeProcessedBlock::maybe(|_| vec![], data);
-
-            // stash (maybe processed) blocks in memory as long as we have room
-            mem_blocks.insert(cid.into(), maybe_processed);
-        }
-
-        let commit = commit.ok_or(DriveError::MissingCommit)?;
-
-        // the commit always must point to a Node; empty node => empty MST special case
-        let root_node: MstNode = match mem_blocks
-            .get(&commit.data)
-            .ok_or(DriveError::MissingCommit)?
-        {
-            MaybeProcessedBlock::Processed(_) => Err(WalkError::BadCommitFingerprint)?,
-            MaybeProcessedBlock::Raw(bytes) => serde_ipld_dagcbor::from_slice(bytes)?,
-        };
-
-        if root_node.depth.unwrap_or(0) < 4 {
-            return Ok(None);
-        }
-
-        let mut walker = Walker::new(root_node);
-        Ok(Some(walker.count_entries(&mut mem_blocks)?))
-    }
 
     /// Begin processing an atproto MST from a CAR file
     ///

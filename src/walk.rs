@@ -3,7 +3,6 @@
 use crate::link::{NodeThing, ObjectLink, ThingKind};
 use crate::mst::{Depth, MstNode};
 use crate::{Bytes, HashMap, Rkey, disk::DiskStore, drive::MaybeProcessedBlock, noop};
-use std::collections::BTreeMap;
 use cid::Cid;
 use std::convert::Infallible;
 
@@ -85,68 +84,8 @@ impl Walker {
             links: 0,
             prev_rkey: "".to_string(),
             root_depth: root_node.depth.unwrap_or(0), // empty root node = empty mst
-            todo: vec![root_node.things.into_iter().filter(|t| !t.is_record()).collect()],
+            todo: vec![root_node.things],
         }
-    }
-
-    pub fn count_entries(
-        &mut self,
-        blocks: &HashMap<ObjectLink, MaybeProcessedBlock>,
-    ) -> Result<BTreeMap<usize, usize>, WalkError> {
-        let mut counts = BTreeMap::new();
-
-        while let Some(NodeThing { link, kind }) = self.next_todo() {
-            let Some(mpb) = blocks.get(&link) else {
-                return Err(WalkError::MissingBlock(NodeThing { link, kind }.into()));
-            };
-            match kind {
-                ThingKind::Record(_) => unreachable!(),
-                ThingKind::ChildNode => {
-                    let MaybeProcessedBlock::Raw(data) = mpb else {
-                        return Err(WalkError::BadCommitFingerprint);
-                    };
-
-                    let node: MstNode =
-                        serde_ipld_dagcbor::from_slice(data).map_err(WalkError::BadCommit)?;
-
-                    if node.is_empty() {
-                        return Err(WalkError::MstError(MstError::EmptyNode));
-                    }
-
-                    let current_depth = self.root_depth - (self.todo.len() - 1) as u32;
-                    let next_depth = current_depth
-                        .checked_sub(1)
-                        .ok_or(MstError::DepthUnderflow)?;
-                    if let Some(d) = node.depth
-                        && d != next_depth
-                    {
-                        return Err(WalkError::MstError(MstError::WrongDepth {
-                            depth: d,
-                            expected: next_depth,
-                        }));
-                    }
-
-                    let mut entries = 0;
-                    let mut links = Vec::new();
-                    for thing in node.things {
-                        if thing.is_record() {
-                            entries += 1;
-                        } else {
-                            links.push(thing);
-                        }
-                    }
-                    self.todo.push(links);
-                    if entries > 0 {
-                        *counts.entry(entries).or_default() += 1;
-                        if entries > 10_000 {
-                            eprintln!("whoa, found a {}-entry node", entries);
-                        }
-                    }
-                }
-            }
-        }
-
-        Ok(counts)
     }
 
     pub fn viz(
