@@ -13,7 +13,7 @@ Once blocks are loaded, the MST is walked and emitted as chunks of
 
 Some MST validations are applied:
 - Keys must appear in order
-- Keys must be at the correct MST tree depth
+- Keys must be at the correct MST tree layer
 
 `iroh_car` additionally applies a block size limit of `2MiB`.
 
@@ -74,19 +74,15 @@ Find more [examples in the repo](https://tangled.org/@microcosm.blue/repo-stream
 
 */
 
-pub mod block;
 pub mod disk;
-pub mod drive;
-pub mod link;
+pub mod mem;
 pub mod mst;
 pub mod walk;
 
-pub use disk::{DiskBuilder, DiskError, DiskStore};
-pub use block::noop;
-pub use drive::{DriveError, DriverBuilder, LoadError, MemCar, PartialCar};
-pub use link::NodeThing;
+pub use disk::{DiskBuilder, DiskDriver, DiskError, DiskStore, DriveError};
+pub use mem::{DriverBuilder, LoadError, MemCar, PartialCar};
 pub use mst::Commit;
-pub use walk::{Output, Step, WalkError, WalkItem};
+pub use walk::{Output, Step, WalkError, WalkItem, noop};
 
 pub type Bytes = Vec<u8>;
 

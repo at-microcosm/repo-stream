@@ -1,24 +1,15 @@
-//! Consume a CAR from an AsyncRead, producing an ordered stream of records
+//! Load a CAR file into memory and walk its MST
 
-use crate::link::ObjectLink;
 use crate::{
     Bytes, HashMap, RepoPath, Step,
-    block::{MaybeProcessedBlock, noop},
-    disk::{DiskError, DiskStore},
-    mst::MstNode,
-    walk::{MstError, Output, WalkItem},
+    disk::{DiskDriver, DiskError, DiskStore, DriveError, make_disk_driver},
+    mst::{Commit, MstNode, ObjectLink},
+    walk::{MaybeProcessedBlock, Output, WalkError, WalkItem, Walker},
 };
-use cid::Cid;
 use iroh_car::CarReader;
 use std::convert::Infallible;
-use tokio::{io::AsyncRead, sync::mpsc};
-
-use crate::mst::Commit;
-use crate::walk::{WalkError, Walker};
 use thiserror::Error;
-
-/// An in-order chunk of RepoPath + CID + (processed) Block
-pub type BlockChunk = Vec<Output>;
+use tokio::io::AsyncRead;
 
 /// Errors that can occur while loading a CAR into memory
 #[derive(Debug, Error)]
@@ -38,9 +29,8 @@ pub enum LoadError<R: AsyncRead + Unpin> {
     /// The partial state is returned so the caller can decide what to do
     /// (e.g. resume with disk storage via `PartialCar::finish_loading`).
     #[error("partially loaded car")]
-    MemoryLimitReached(Box<PartialCar<R>>),
+    MemoryLimitReached(PartialCar<R>),
 }
-
 
 /// A partially memory-loaded CAR file that hit the memory limit mid-stream.
 ///
@@ -48,7 +38,7 @@ pub enum LoadError<R: AsyncRead + Unpin> {
 #[derive(Debug)]
 pub struct PartialCar<R: AsyncRead + Unpin> {
     pub(crate) car: CarReader<R>,
-    pub(crate) root: Cid,
+    pub(crate) root: cid::Cid,
     pub(crate) process: fn(Bytes) -> Bytes,
     pub(crate) max_size: usize,
     pub(crate) blocks: HashMap<ObjectLink, MaybeProcessedBlock>,
@@ -67,7 +57,7 @@ impl Default for DriverBuilder {
     fn default() -> Self {
         Self {
             mem_limit_mb: 10,
-            block_processor: noop,
+            block_processor: crate::walk::noop,
         }
     }
 }
@@ -99,10 +89,7 @@ impl DriverBuilder {
     /// Returns a `MemCar` ready for walking. If the blocks exceed the memory
     /// limit, returns `Err(LoadError::MemoryLimitReached(partial))` containing
     /// the partial state, which can be resumed with disk storage.
-    pub async fn load_car<R: AsyncRead + Unpin>(
-        &self,
-        reader: R,
-    ) -> Result<MemCar, LoadError<R>> {
+    pub async fn load_car<R: AsyncRead + Unpin>(&self, reader: R) -> Result<MemCar, LoadError<R>> {
         load_car(reader, self.block_processor, self.mem_limit_mb).await
     }
 }
@@ -165,13 +152,12 @@ async fn load_car<R: AsyncRead + Unpin>(
         MaybeProcessedBlock::Processed(_) => Err(WalkError::BadCommitFingerprint)?,
         MaybeProcessedBlock::Raw(bytes) => serde_ipld_dagcbor::from_slice(bytes)?,
     };
-    let mut walker = Walker::new(root_node);
 
     Ok(MemCar {
         commit,
-        prev_key,
+        prev_key: None,
         blocks: mem_blocks,
-        walker,
+        walker: Walker::new(root_node),
         process,
         trailing_key: None,
     })
@@ -192,7 +178,6 @@ pub struct MemCar {
 }
 
 impl MemCar {
-
     /// Seek forward to the first record at or after `target`.
     ///
     /// Uses the MST structure to skip entire subtrees efficiently.
@@ -202,10 +187,6 @@ impl MemCar {
     }
 
     /// Walk forward past any gaps to determine the trailing edge key.
-    ///
-    /// The first record key encountered after a gap (whether the record's block
-    /// is present or missing) is the trailing edge — the first key not covered
-    /// by this slice. Sets `self.trailing_key` and returns it.
     fn find_trailing_edge(&mut self) -> Result<Option<RepoPath>, WalkError> {
         let trailing = loop {
             match self.walker.step(&self.blocks, self.process)? {
@@ -224,6 +205,8 @@ impl MemCar {
     /// Returns `Step::Value(output)` for each record in key order, then
     /// `Step::End(None)` at the end of a full CAR, or `Step::End(Some(key))`
     /// for CAR slices where `key` is the first key immediately after the slice.
+    ///
+    /// TODO: make this an implementation of Iterator
     pub fn next(&mut self) -> Result<Step, WalkError> {
         if let Some(trailing) = &self.trailing_key {
             return Ok(Step::End(trailing.clone()));
@@ -249,7 +232,7 @@ impl MemCar {
     ///
     /// Returns `Step::Value(records)` while records remain, then `Step::End(next_key)`
     /// where `next_key` is the first key after the slice (for CAR slices), or `None`.
-    pub fn next_chunk(&mut self, n: usize) -> Result<Step<BlockChunk>, WalkError> {
+    pub fn next_chunk(&mut self, n: usize) -> Result<Step<Vec<Output>>, WalkError> {
         if let Some(trailing) = &self.trailing_key {
             return Ok(Step::End(trailing.clone()));
         }
@@ -279,43 +262,16 @@ impl MemCar {
 }
 
 // ---------------------------------------------------------------------------
-// Disk path (kept for future wiring, not yet part of the primary API)
+// Resuming a partial load on disk
 // ---------------------------------------------------------------------------
-
-/// Errors that can happen while consuming blocks via the disk path
-#[derive(Debug, thiserror::Error)]
-pub enum DriveError {
-    #[error("Error from iroh_car: {0}")]
-    CarReader(#[from] iroh_car::Error),
-    #[error("Failed to decode commit block: {0}")]
-    BadBlock(#[from] serde_ipld_dagcbor::DecodeError<Infallible>),
-    #[error("The Commit block reference by the root was not found")]
-    MissingCommit,
-    #[error("Failed to walk the mst tree: {0}")]
-    WalkError(#[from] WalkError),
-    #[error("CAR file had no roots")]
-    MissingRoot,
-    #[error("Storage error")]
-    StorageError(#[from] DiskError),
-    #[error("Unexpected missing block: {0:?}")]
-    MissingBlock(Cid),
-    #[error("Tried to send on a closed channel")]
-    ChannelSendError,
-    #[error("Failed to join a task: {0}")]
-    JoinError(#[from] tokio::task::JoinError),
-}
-
-impl From<MstError> for DriveError {
-    fn from(me: MstError) -> DriveError {
-        DriveError::WalkError(WalkError::MstError(me))
-    }
-}
 
 impl<R: AsyncRead + Unpin> PartialCar<R> {
     pub async fn finish_loading(
         mut self,
         mut store: DiskStore,
     ) -> Result<(Commit, Option<RepoPath>, DiskDriver), DriveError> {
+        use tokio::sync::mpsc;
+
         store = tokio::task::spawn(async move {
             let kvs = self
                 .blocks
@@ -390,162 +346,6 @@ impl<R: AsyncRead + Unpin> PartialCar<R> {
         };
         let walker = Walker::new(node);
 
-        Ok((
-            commit,
-            None,
-            DiskDriver {
-                process: self.process,
-                state: Some(BigState { store, walker }),
-            },
-        ))
-    }
-}
-
-struct BigState {
-    store: DiskStore,
-    walker: Walker,
-}
-
-/// MST walker that reads from disk instead of an in-memory hashmap
-pub struct DiskDriver {
-    process: fn(Bytes) -> Bytes,
-    state: Option<BigState>,
-}
-
-// for doctests only
-#[doc(hidden)]
-pub fn _get_fake_disk_driver() -> DiskDriver {
-    DiskDriver {
-        process: noop,
-        state: None,
-    }
-}
-
-impl DiskDriver {
-    /// Walk the MST returning up to `n` key + record pairs
-    ///
-    /// ```no_run
-    /// # use repo_stream::{drive::{DiskDriver, DriveError, _get_fake_disk_driver}, Step, noop};
-    /// # #[tokio::main]
-    /// # async fn main() -> Result<(), DriveError> {
-    /// # let mut disk_driver = _get_fake_disk_driver();
-    /// while let Step::Value(outputs) = disk_driver.next_chunk(256).await? {
-    ///     for output in outputs {
-    ///         println!("{}: size={}", output.key, output.data.len());
-    ///     }
-    /// }
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub async fn next_chunk(&mut self, n: usize) -> Result<Step<Vec<Output>>, DriveError> {
-        let process = self.process;
-
-        let mut state = self.state.take().expect("DiskDriver must have Some(state)");
-
-        let (state, res) =
-            tokio::task::spawn_blocking(move || -> (BigState, Result<BlockChunk, DriveError>) {
-                let mut out = Vec::with_capacity(n);
-
-                for _ in 0..n {
-                    match state.walker.disk_step(&state.store, process) {
-                        Err(e) => return (state, Err(e.into())),
-                        Ok(Some(WalkItem::Record(output))) => out.push(output),
-                        Ok(Some(WalkItem::MissingRecord { cid, .. }))
-                        | Ok(Some(WalkItem::MissingSubtree { cid })) => {
-                            return (state, Err(DriveError::MissingBlock(cid)));
-                        }
-                        Ok(None) => break,
-                    }
-                }
-
-                (state, Ok::<_, DriveError>(out))
-            })
-            .await?;
-
-        self.state = Some(state);
-
-        let out = res?;
-
-        if out.is_empty() {
-            Ok(Step::End(None))
-        } else {
-            Ok(Step::Value(out))
-        }
-    }
-
-    fn read_tx_blocking(
-        &mut self,
-        n: usize,
-        tx: mpsc::Sender<Result<Step<BlockChunk>, DriveError>>,
-    ) -> Result<(), mpsc::error::SendError<Result<Step<BlockChunk>, DriveError>>> {
-        let BigState { store, walker } = self.state.as_mut().expect("valid state");
-
-        loop {
-            let mut out: BlockChunk = Vec::with_capacity(n);
-
-            for _ in 0..n {
-                match walker.disk_step(store, self.process) {
-                    Err(e) => return tx.blocking_send(Err(e.into())),
-                    Ok(Some(WalkItem::Record(output))) => out.push(output),
-                    Ok(Some(WalkItem::MissingRecord { cid, .. }))
-                    | Ok(Some(WalkItem::MissingSubtree { cid })) => {
-                        return tx.blocking_send(Err(DriveError::MissingBlock(cid)));
-                    }
-                    Ok(None) => break,
-                }
-            }
-
-            if out.is_empty() {
-                break;
-            }
-            tx.blocking_send(Ok(Step::Value(out)))?;
-        }
-
-        Ok(())
-    }
-
-    /// Spawn the disk reading task into a tokio blocking thread
-    ///
-    /// ```no_run
-    /// # use repo_stream::{drive::{DiskDriver, DriveError, _get_fake_disk_driver}, Step, noop};
-    /// # #[tokio::main]
-    /// # async fn main() -> Result<(), DriveError> {
-    /// # let mut disk_driver = _get_fake_disk_driver();
-    /// let (mut rx, join) = disk_driver.to_channel(512);
-    /// while let Some(recvd) = rx.recv().await {
-    ///     let outputs = recvd?;
-    ///     let Step::Value(outputs) = outputs else { break; };
-    ///     for output in outputs {
-    ///         println!("{}: size={}", output.key, output.data.len());
-    ///     }
-    ///
-    /// }
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub fn to_channel(
-        mut self,
-        n: usize,
-    ) -> (
-        mpsc::Receiver<Result<Step<BlockChunk>, DriveError>>,
-        tokio::task::JoinHandle<Self>,
-    ) {
-        let (tx, rx) = mpsc::channel::<Result<Step<BlockChunk>, DriveError>>(1);
-
-        let chan_task = tokio::task::spawn_blocking(move || {
-            if let Err(mpsc::error::SendError(_)) = self.read_tx_blocking(n, tx) {
-                log::debug!("big car reader exited early due to dropped receiver channel");
-            }
-            self
-        });
-
-        (rx, chan_task)
-    }
-
-    /// Reset the disk storage so it can be reused.
-    pub async fn reset_store(mut self) -> Result<DiskStore, DriveError> {
-        let BigState { store, .. } = self.state.take().expect("valid state");
-        store.reset().await?;
-        Ok(store)
+        Ok((commit, None, make_disk_driver(store, walker, self.process)))
     }
 }

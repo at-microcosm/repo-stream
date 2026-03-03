@@ -1,16 +1,54 @@
-//! Low-level types for parsing raw atproto MST CARs
+//! low-level types for parsing raw atproto MST CARs
 //!
-//! The primary aim is to work through the **tree** structure. Non-node blocks
-//! are left as raw bytes, for upper levels to parse into DAG-CBOR or whatever.
+//! The primary aim is to work through the tree structure. Non-node blocks are
+//! left as raw bytes, for upper levels to parse into DAG-CBOR or whatever.
 
-use crate::link::{NodeThing, ObjectLink, ThingKind};
 use cid::Cid;
 use serde::Deserialize;
 use serde::de::{self, Deserializer, MapAccess, Unexpected, Visitor};
 use sha2::{Digest, Sha256};
 use std::fmt;
 
-pub type Depth = u32;
+#[derive(Debug, serde::Deserialize, Clone, PartialEq, Eq, Hash)]
+pub struct ObjectLink(Cid);
+
+impl ObjectLink {
+    pub fn to_bytes(&self) -> Vec<u8> {
+        self.0.to_bytes()
+    }
+}
+
+impl From<Cid> for ObjectLink {
+    fn from(cid: Cid) -> ObjectLink {
+        ObjectLink(cid)
+    }
+}
+
+impl From<ObjectLink> for Cid {
+    fn from(link: ObjectLink) -> Cid {
+        link.0
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct NodeThing {
+    pub link: ObjectLink,
+    pub kind: ThingKind,
+}
+
+impl NodeThing {
+    pub fn is_record(&self) -> bool {
+        matches!(self.kind, ThingKind::Record(_))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ThingKind {
+    ChildNode,
+    Record(crate::RepoPath),
+}
+
+pub type Layer = u32;
 
 /// The top-level data object in a repository's tree is a signed commit.
 #[derive(Debug, Deserialize)]
@@ -42,14 +80,14 @@ pub struct Commit {
 }
 
 #[inline(always)]
-pub fn atproto_mst_depth(key: &str) -> Depth {
+pub fn atproto_mst_layer(key: &str) -> Layer {
     // 128 bits oughta be enough: https://bsky.app/profile/retr0.id/post/3jwwbf4izps24
     u128::from_be_bytes(Sha256::digest(key).split_at(16).0.try_into().unwrap()).leading_zeros() / 2
 }
 
 #[derive(Debug, Clone)]
 pub struct MstNode {
-    pub depth: Option<Depth>, // known for nodes with entries (required for root)
+    pub layer: Option<Layer>, // known for nodes with entries (required for root)
     pub things: Vec<NodeThing>,
 }
 
@@ -74,7 +112,7 @@ impl<'de> Deserialize<'de> for MstNode {
                 let mut left = None;
                 let mut found_entries = false;
                 let mut things = Vec::new();
-                let mut depth = None;
+                let mut layer = None;
 
                 while let Some(key) = map.next_key()? {
                     match key {
@@ -118,13 +156,13 @@ impl<'de> Deserialize<'de> for MstNode {
                                     )
                                 })?;
 
-                                let key_depth = atproto_mst_depth(&rkey_s);
-                                if depth.is_none() {
-                                    depth = Some(key_depth);
-                                } else if Some(key_depth) != depth {
+                                let key_layer = atproto_mst_layer(&rkey_s);
+                                if layer.is_none() {
+                                    layer = Some(key_layer);
+                                } else if Some(key_layer) != layer {
                                     return Err(de::Error::invalid_value(
                                         Unexpected::Bytes(&prefix),
-                                        &"all rkeys to have equal MST depth",
+                                        &"all rkeys to have equal MST layer",
                                     ));
                                 }
 
@@ -158,7 +196,7 @@ impl<'de> Deserialize<'de> for MstNode {
                     things.push(l);
                 }
 
-                Ok(MstNode { depth, things })
+                Ok(MstNode { layer, things })
             }
         }
 

@@ -1,5 +1,5 @@
 // use repo_stream::Driver;
-use repo_stream::mst::atproto_mst_depth;
+use repo_stream::mst::atproto_mst_layer;
 
 // https://github.com/bluesky-social/atproto-interop-tests/blob/main/mst/example_keys.txt
 const INTEROP_EXAMPLE_KEYS: &str = "\
@@ -164,7 +164,7 @@ Z5/977983";
 fn test_interop_example_keys() {
     for key in INTEROP_EXAMPLE_KEYS.split('\n') {
         let expected: u32 = key.chars().nth(1).unwrap().to_digit(16).unwrap();
-        let computed: u32 = atproto_mst_depth(key);
+        let computed: u32 = atproto_mst_layer(key);
         assert_eq!(computed, expected);
     }
 }
@@ -183,7 +183,7 @@ fn test_iterop_key_heights() {
         ("app.bsky.feed.post/454397e440ec", 4),
         ("app.bsky.feed.post/9adeb165882c", 8),
     ] {
-        let computed = atproto_mst_depth(key);
+        let computed = atproto_mst_layer(key);
         assert_eq!(computed, expected);
     }
 }
@@ -197,7 +197,7 @@ fn test_spec_example_keys() {
         ("app.bsky.feed.post/454397e440ec", 4),
         ("app.bsky.feed.post/9adeb165882c", 8),
     ] {
-        let computed = atproto_mst_depth(key);
+        let computed = atproto_mst_layer(key);
         assert_eq!(computed, expected);
     }
 }
@@ -206,7 +206,7 @@ fn test_spec_example_keys() {
 fn test_ietf_example_keys() {
     // https://atproto.com/specs/repository#mst-structure
     for (key, expected) in [("key1", 0), ("key7", 1), ("key515", 4)] {
-        let computed = atproto_mst_depth(key);
+        let computed = atproto_mst_layer(key);
         assert_eq!(computed, expected);
     }
 }

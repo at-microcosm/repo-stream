@@ -32,7 +32,12 @@ async fn main() -> Result<()> {
     log::info!("got commit: {:?}", mem_car.commit);
 
     while let Step::Value(records) = mem_car.next_chunk(256)? {
-        for Output { key: _, cid: _, data: _ } in records {
+        for Output {
+            key: _,
+            cid: _,
+            data: _,
+        } in records
+        {
             // process records
         }
     }

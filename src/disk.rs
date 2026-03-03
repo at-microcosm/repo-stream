@@ -1,8 +1,5 @@
 /*!
-Disk storage for blocks on disk
-
-Currently this uses sqlite. In testing sqlite wasn't the fastest, but it seemed
-to be the best behaved in terms of both on-disk space usage and memory usage.
+Disk storage and disk-based MST walking.
 
 ```no_run
 # use repo_stream::{DiskBuilder, DiskError};
@@ -17,28 +14,70 @@ let store = DiskBuilder::new()
 ```
 */
 
-use crate::{Bytes, drive::DriveError};
+use crate::{
+    Bytes, Step,
+    mst::ThingKind,
+    walk::{MaybeProcessedBlock, MstError, Output, WalkError, WalkItem, Walker},
+};
 use fjall::{Database, Error as FjallError, Keyspace, KeyspaceCreateOptions};
+use std::convert::Infallible;
 use std::path::PathBuf;
+use thiserror::Error;
+use tokio::sync::mpsc;
+
+// ---------------------------------------------------------------------------
+// Disk storage errors
+// ---------------------------------------------------------------------------
 
 #[derive(Debug, thiserror::Error)]
 pub enum DiskError {
     /// A wrapped database error
-    ///
-    /// (The wrapped err should probably be obscured to remove public-facing
-    /// sqlite bits)
     #[error(transparent)]
     DbError(#[from] FjallError),
     /// A tokio blocking task failed to join
     #[error("Failed to join a tokio blocking task: {0}")]
     JoinError(#[from] tokio::task::JoinError),
     /// The total size of stored blocks exceeded the allowed size
-    ///
-    /// If you need to process *really* big CARs, you can configure a higher
-    /// limit.
     #[error("Maximum disk size reached")]
     MaxSizeExceeded,
 }
+
+// ---------------------------------------------------------------------------
+// Disk driver errors
+// ---------------------------------------------------------------------------
+
+/// Errors that can happen while consuming blocks via the disk path
+#[derive(Debug, Error)]
+pub enum DriveError {
+    #[error("Error from iroh_car: {0}")]
+    CarReader(#[from] iroh_car::Error),
+    #[error("Failed to decode commit block: {0}")]
+    BadBlock(#[from] serde_ipld_dagcbor::DecodeError<Infallible>),
+    #[error("The Commit block referenced by the root was not found")]
+    MissingCommit,
+    #[error("Failed to walk the MST: {0}")]
+    WalkError(#[from] WalkError),
+    #[error("CAR file had no roots")]
+    MissingRoot,
+    #[error("Storage error: {0}")]
+    StorageError(#[from] DiskError),
+    #[error("Unexpected missing block: {0:?}")]
+    MissingBlock(cid::Cid),
+    #[error("Tried to send on a closed channel")]
+    ChannelSendError,
+    #[error("Failed to join a task: {0}")]
+    JoinError(#[from] tokio::task::JoinError),
+}
+
+impl From<MstError> for DriveError {
+    fn from(me: MstError) -> DriveError {
+        DriveError::WalkError(WalkError::MstError(me))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Disk store
+// ---------------------------------------------------------------------------
 
 /// Builder-style disk store setup
 #[derive(Debug, Clone)]
@@ -134,12 +173,12 @@ impl DiskStore {
     pub(crate) fn put_many(
         &mut self,
         kv: impl Iterator<Item = (Vec<u8>, Bytes)>,
-    ) -> Result<(), DriveError> {
+    ) -> Result<(), DiskError> {
         let mut batch = self.db.batch();
         for (k, v) in kv {
             self.stored += v.len();
             if self.stored > self.max_stored {
-                return Err(DiskError::MaxSizeExceeded.into());
+                return Err(DiskError::MaxSizeExceeded);
             }
             batch.insert(&self.keyspace, k, v);
         }
@@ -156,5 +195,207 @@ impl DiskStore {
     pub async fn reset(&self) -> Result<(), DiskError> {
         let keyspace = self.keyspace.clone();
         Ok(tokio::task::spawn_blocking(move || keyspace.clear()).await??)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// disk_step on Walker (impl in this module to avoid walk.rs → disk.rs dep)
+// ---------------------------------------------------------------------------
+
+impl Walker {
+    /// blocking!!!!!
+    pub(crate) fn disk_step(
+        &mut self,
+        blocks: &DiskStore,
+        process: impl Fn(Bytes) -> Bytes,
+    ) -> Result<Option<WalkItem>, WalkError> {
+        while let Some(thing) = self.next_todo() {
+            let Some(block_slice) = blocks.get(&thing.link.to_bytes())? else {
+                return Ok(Some(match thing.kind {
+                    ThingKind::Record(key) => WalkItem::MissingRecord {
+                        key,
+                        cid: thing.link.into(),
+                    },
+                    ThingKind::ChildNode => WalkItem::MissingSubtree {
+                        cid: thing.link.into(),
+                    },
+                }));
+            };
+            let mpb = MaybeProcessedBlock::from_bytes(block_slice.to_vec());
+            if let Some(out) = self.mpb_step(thing, &mpb, &process)? {
+                return Ok(Some(WalkItem::Record(out)));
+            }
+        }
+        Ok(None)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Disk driver
+// ---------------------------------------------------------------------------
+
+struct BigState {
+    store: DiskStore,
+    walker: Walker,
+}
+
+/// MST walker that reads from disk instead of an in-memory hashmap
+pub struct DiskDriver {
+    process: fn(Bytes) -> Bytes,
+    state: Option<BigState>,
+}
+
+// for doctests only
+#[doc(hidden)]
+pub fn _get_fake_disk_driver() -> DiskDriver {
+    DiskDriver {
+        process: crate::walk::noop,
+        state: None,
+    }
+}
+
+impl DiskDriver {
+    /// Walk the MST returning up to `n` key + record pairs
+    ///
+    /// ```no_run
+    /// # use repo_stream::{disk::{DiskDriver, DriveError, _get_fake_disk_driver}, Step};
+    /// # #[tokio::main]
+    /// # async fn main() -> Result<(), DriveError> {
+    /// # let mut disk_driver = _get_fake_disk_driver();
+    /// while let Step::Value(outputs) = disk_driver.next_chunk(256).await? {
+    ///     for output in outputs {
+    ///         println!("{}: size={}", output.key, output.data.len());
+    ///     }
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn next_chunk(&mut self, n: usize) -> Result<Step<Vec<Output>>, DriveError> {
+        let process = self.process;
+
+        let mut state = self.state.take().expect("DiskDriver must have Some(state)");
+
+        let (state, res) =
+            tokio::task::spawn_blocking(move || -> (BigState, Result<Vec<Output>, DriveError>) {
+                let mut out = Vec::with_capacity(n);
+
+                for _ in 0..n {
+                    match state.walker.disk_step(&state.store, process) {
+                        Err(e) => return (state, Err(e.into())),
+                        Ok(Some(WalkItem::Record(output))) => out.push(output),
+                        Ok(Some(WalkItem::MissingRecord { cid, .. }))
+                        | Ok(Some(WalkItem::MissingSubtree { cid })) => {
+                            return (state, Err(DriveError::MissingBlock(cid)));
+                        }
+                        Ok(None) => break,
+                    }
+                }
+
+                (state, Ok::<_, DriveError>(out))
+            })
+            .await?;
+
+        self.state = Some(state);
+
+        let out = res?;
+
+        if out.is_empty() {
+            Ok(Step::End(None))
+        } else {
+            Ok(Step::Value(out))
+        }
+    }
+
+    fn read_tx_blocking(
+        &mut self,
+        n: usize,
+        tx: mpsc::Sender<Result<Step<Vec<Output>>, DriveError>>,
+    ) -> Result<(), mpsc::error::SendError<Result<Step<Vec<Output>>, DriveError>>> {
+        let BigState { store, walker } = self.state.as_mut().expect("valid state");
+
+        loop {
+            let mut out: Vec<Output> = Vec::with_capacity(n);
+
+            for _ in 0..n {
+                match walker.disk_step(store, self.process) {
+                    Err(e) => return tx.blocking_send(Err(e.into())),
+                    Ok(Some(WalkItem::Record(output))) => out.push(output),
+                    Ok(Some(WalkItem::MissingRecord { cid, .. }))
+                    | Ok(Some(WalkItem::MissingSubtree { cid })) => {
+                        return tx.blocking_send(Err(DriveError::MissingBlock(cid)));
+                    }
+                    Ok(None) => break,
+                }
+            }
+
+            if out.is_empty() {
+                break;
+            }
+            tx.blocking_send(Ok(Step::Value(out)))?;
+        }
+
+        Ok(())
+    }
+
+    /// Spawn the disk reading task into a tokio blocking thread
+    ///
+    /// ```no_run
+    /// # use repo_stream::{disk::{DiskDriver, DriveError, _get_fake_disk_driver}, Step};
+    /// # #[tokio::main]
+    /// # async fn main() -> Result<(), DriveError> {
+    /// # let mut disk_driver = _get_fake_disk_driver();
+    /// let (mut rx, join) = disk_driver.to_channel(512);
+    /// while let Some(recvd) = rx.recv().await {
+    ///     let outputs = recvd?;
+    ///     let Step::Value(outputs) = outputs else { break; };
+    ///     for output in outputs {
+    ///         println!("{}: size={}", output.key, output.data.len());
+    ///     }
+    ///
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn to_channel(
+        mut self,
+        n: usize,
+    ) -> (
+        mpsc::Receiver<Result<Step<Vec<Output>>, DriveError>>,
+        tokio::task::JoinHandle<Self>,
+    ) {
+        let (tx, rx) = mpsc::channel::<Result<Step<Vec<Output>>, DriveError>>(1);
+
+        let chan_task = tokio::task::spawn_blocking(move || {
+            if let Err(mpsc::error::SendError(_)) = self.read_tx_blocking(n, tx) {
+                log::debug!("big car reader exited early due to dropped receiver channel");
+            }
+            self
+        });
+
+        (rx, chan_task)
+    }
+
+    /// Reset the disk storage so it can be reused.
+    pub async fn reset_store(mut self) -> Result<DiskStore, DriveError> {
+        let BigState { store, .. } = self.state.take().expect("valid state");
+        store.reset().await?;
+        Ok(store)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PartialCar::finish_loading lives in mem.rs but needs DiskDriver — it's
+// imported there from this module.
+// ---------------------------------------------------------------------------
+
+/// Build a `DiskDriver` from a walker and store. Used by `PartialCar::finish_loading`.
+pub(crate) fn make_disk_driver(
+    store: DiskStore,
+    walker: Walker,
+    process: fn(Bytes) -> Bytes,
+) -> DiskDriver {
+    DiskDriver {
+        process,
+        state: Some(BigState { store, walker }),
     }
 }
