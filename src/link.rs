@@ -39,5 +39,5 @@ impl NodeThing {
 #[derive(Debug, Clone, PartialEq)]
 pub enum ThingKind {
     ChildNode,
-    Record(crate::Rkey),
+    Record(crate::RepoPath),
 }

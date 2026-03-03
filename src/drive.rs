@@ -1,12 +1,12 @@
 //! Consume a CAR from an AsyncRead, producing an ordered stream of records
 
-use crate::link::{NodeThing, ObjectLink, ThingKind};
+use crate::link::ObjectLink;
 use crate::{
-    Bytes, HashMap, Rkey, Step,
+    Bytes, HashMap, RepoPath, Step,
     block::{MaybeProcessedBlock, noop},
     disk::{DiskError, DiskStore},
     mst::MstNode,
-    walk::{MstError, Output},
+    walk::{MstError, Output, WalkItem},
 };
 use cid::Cid;
 use iroh_car::CarReader;
@@ -17,7 +17,7 @@ use crate::mst::Commit;
 use crate::walk::{WalkError, Walker};
 use thiserror::Error;
 
-/// An in-order chunk of Rkey + CID + (processed) Block
+/// An in-order chunk of RepoPath + CID + (processed) Block
 pub type BlockChunk = Vec<Output>;
 
 /// Errors that can occur while loading a CAR into memory
@@ -167,15 +167,15 @@ async fn load_car<R: AsyncRead + Unpin>(
     };
     let mut walker = Walker::new(root_node);
 
-    let prev_rkey = walker.step_to_edge(&mem_blocks)?;
+    let prev_key = walker.step_to_edge(&mem_blocks)?;
 
     Ok(MemCar {
         commit,
-        prev_rkey,
+        prev_key,
         blocks: mem_blocks,
         walker,
         process,
-        next_missing: None,
+        trailing_key: None,
     })
 }
 
@@ -183,13 +183,14 @@ async fn load_car<R: AsyncRead + Unpin>(
 #[derive(Debug)]
 pub struct MemCar {
     pub commit: Commit,
-    /// For CAR slices: the rkey of the last record before this slice's leading edge.
+    /// For CAR slices: the key of the last record before this slice's leading edge.
     /// `None` if this slice (or full CAR) starts from the leftmost record in the tree.
-    pub prev_rkey: Option<Rkey>,
+    pub prev_key: Option<RepoPath>,
     pub blocks: HashMap<ObjectLink, MaybeProcessedBlock>,
     walker: Walker,
     process: fn(Bytes) -> Bytes,
-    next_missing: Option<NodeThing>,
+    /// `None` = no gap encountered yet; `Some(k)` = trailing edge determined.
+    trailing_key: Option<Option<RepoPath>>,
 }
 
 impl MemCar {
@@ -197,51 +198,81 @@ impl MemCar {
     /// Seek forward to the first record at or after `target`.
     ///
     /// Uses the MST structure to skip entire subtrees efficiently.
-    /// After this returns, the next `next_chunk` call will start at or after `target`.
+    /// After this returns, the next `next` or `next_chunk` call will start at or after `target`.
     pub fn seek(&mut self, target: &str) -> Result<(), WalkError> {
         self.walker.seek(target, &self.blocks)
     }
 
-    /// Get the next record
-    pub fn next(&mut self) -> Result<Option<Output>, WalkError> {
-        todo!()
+    /// Walk forward past any gaps to determine the trailing edge key.
+    ///
+    /// The first record key encountered after a gap (whether the record's block
+    /// is present or missing) is the trailing edge — the first key not covered
+    /// by this slice. Sets `self.trailing_key` and returns it.
+    fn find_trailing_edge(&mut self) -> Result<Option<RepoPath>, WalkError> {
+        let trailing = loop {
+            match self.walker.step(&self.blocks, self.process)? {
+                Some(WalkItem::Record(r)) => break Some(r.key),
+                Some(WalkItem::MissingRecord { key, .. }) => break Some(key),
+                Some(WalkItem::MissingSubtree { .. }) => continue,
+                None => break None,
+            }
+        };
+        self.trailing_key = Some(trailing.clone());
+        Ok(trailing)
     }
 
-    /// Iterate up to `n` records in rkey order.
+    /// Get the next record.
     ///
-    /// Returns `Step::Value(records)` while records remain, then `Step::End(next_rkey)`
-    /// where `next_rkey` is the first rkey after the slice (for CAR slices), or `None`.
-    pub fn next_chunk(&mut self, n: usize) -> Result<Step<BlockChunk>, WalkError> {
-        if let Some(ref mut missing) = self.next_missing {
-            while let Step::Value(sparse_out) =
-                self.walker.step_sparse(&self.blocks, self.process)?
-            {
-                if missing.kind == ThingKind::ChildNode {
-                    *missing = NodeThing {
-                        link: sparse_out.cid.into(),
-                        kind: ThingKind::Record(sparse_out.rkey),
-                    };
-                }
+    /// Returns `Step::Value(output)` for each record in key order, then
+    /// `Step::End(None)` at the end of a full CAR, or `Step::End(Some(key))`
+    /// for CAR slices where `key` is the first key immediately after the slice.
+    pub fn next(&mut self) -> Result<Step, WalkError> {
+        if let Some(trailing) = &self.trailing_key {
+            return Ok(Step::End(trailing.clone()));
+        }
+        match self.walker.step(&self.blocks, self.process)? {
+            Some(WalkItem::Record(out)) => Ok(Step::Value(out)),
+            Some(WalkItem::MissingRecord { key, .. }) => {
+                self.trailing_key = Some(Some(key.clone()));
+                Ok(Step::End(Some(key)))
             }
-            return Ok(match &missing.kind {
-                ThingKind::ChildNode => Step::End(None),
-                ThingKind::Record(rkey) => Step::End(Some(rkey.clone())),
-            });
+            Some(WalkItem::MissingSubtree { .. }) => {
+                let trailing = self.find_trailing_edge()?;
+                Ok(Step::End(trailing))
+            }
+            None => {
+                self.trailing_key = Some(None);
+                Ok(Step::End(None))
+            }
+        }
+    }
+
+    /// Iterate up to `n` records in key order.
+    ///
+    /// Returns `Step::Value(records)` while records remain, then `Step::End(next_key)`
+    /// where `next_key` is the first key after the slice (for CAR slices), or `None`.
+    pub fn next_chunk(&mut self, n: usize) -> Result<Step<BlockChunk>, WalkError> {
+        if let Some(trailing) = &self.trailing_key {
+            return Ok(Step::End(trailing.clone()));
         }
         let mut out = Vec::with_capacity(n);
         for _ in 0..n {
-            match self.walker.step(&self.blocks, self.process) {
-                Ok(Step::Value(record)) => out.push(record),
-                Ok(Step::End(None)) => break,
-                Ok(Step::End(_)) => unreachable!(),
-                Err(WalkError::MissingBlock(missing)) => {
-                    self.next_missing = Some(*missing);
+            match self.walker.step(&self.blocks, self.process)? {
+                Some(WalkItem::Record(record)) => out.push(record),
+                Some(WalkItem::MissingRecord { key, .. }) => {
+                    self.trailing_key = Some(Some(key.clone()));
                     return Ok(Step::Value(out)); // may be empty
                 }
-                Err(other) => return Err(other),
+                Some(WalkItem::MissingSubtree { .. }) => {
+                    let trailing = self.find_trailing_edge()?;
+                    self.trailing_key = Some(trailing);
+                    return Ok(Step::Value(out)); // may be empty
+                }
+                None => break,
             }
         }
         if out.is_empty() {
+            self.trailing_key = Some(None);
             Ok(Step::End(None))
         } else {
             Ok(Step::Value(out))
@@ -268,6 +299,8 @@ pub enum DriveError {
     MissingRoot,
     #[error("Storage error")]
     StorageError(#[from] DiskError),
+    #[error("Unexpected missing block: {0:?}")]
+    MissingBlock(Cid),
     #[error("Tried to send on a closed channel")]
     ChannelSendError,
     #[error("Failed to join a task: {0}")]
@@ -284,7 +317,7 @@ impl<R: AsyncRead + Unpin> PartialCar<R> {
     pub async fn finish_loading(
         mut self,
         mut store: DiskStore,
-    ) -> Result<(Commit, Option<Rkey>, DiskDriver), DriveError> {
+    ) -> Result<(Commit, Option<RepoPath>, DiskDriver), DriveError> {
         store = tokio::task::spawn(async move {
             let kvs = self
                 .blocks
@@ -391,7 +424,7 @@ pub fn _get_fake_disk_driver() -> DiskDriver {
 }
 
 impl DiskDriver {
-    /// Walk the MST returning up to `n` rkey + record pairs
+    /// Walk the MST returning up to `n` key + record pairs
     ///
     /// ```no_run
     /// # use repo_stream::{drive::{DiskDriver, DriveError, _get_fake_disk_driver}, Step, noop};
@@ -400,7 +433,7 @@ impl DiskDriver {
     /// # let mut disk_driver = _get_fake_disk_driver();
     /// while let Step::Value(outputs) = disk_driver.next_chunk(256).await? {
     ///     for output in outputs {
-    ///         println!("{}: size={}", output.rkey, output.data.len());
+    ///         println!("{}: size={}", output.key, output.data.len());
     ///     }
     /// }
     /// # Ok(())
@@ -416,16 +449,15 @@ impl DiskDriver {
                 let mut out = Vec::with_capacity(n);
 
                 for _ in 0..n {
-                    let step = match state.walker.disk_step(&state.store, process) {
-                        Ok(s) => s,
-                        Err(e) => {
-                            return (state, Err(e.into()));
+                    match state.walker.disk_step(&state.store, process) {
+                        Err(e) => return (state, Err(e.into())),
+                        Ok(Some(WalkItem::Record(output))) => out.push(output),
+                        Ok(Some(WalkItem::MissingRecord { cid, .. }))
+                        | Ok(Some(WalkItem::MissingSubtree { cid })) => {
+                            return (state, Err(DriveError::MissingBlock(cid)));
                         }
-                    };
-                    let Step::Value(output) = step else {
-                        break;
-                    };
-                    out.push(output);
+                        Ok(None) => break,
+                    }
                 }
 
                 (state, Ok::<_, DriveError>(out))
@@ -454,15 +486,15 @@ impl DiskDriver {
             let mut out: BlockChunk = Vec::with_capacity(n);
 
             for _ in 0..n {
-                let step = match walker.disk_step(store, self.process) {
-                    Ok(s) => s,
+                match walker.disk_step(store, self.process) {
                     Err(e) => return tx.blocking_send(Err(e.into())),
-                };
-
-                let Step::Value(output) = step else {
-                    break;
-                };
-                out.push(output);
+                    Ok(Some(WalkItem::Record(output))) => out.push(output),
+                    Ok(Some(WalkItem::MissingRecord { cid, .. }))
+                    | Ok(Some(WalkItem::MissingSubtree { cid })) => {
+                        return tx.blocking_send(Err(DriveError::MissingBlock(cid)));
+                    }
+                    Ok(None) => break,
+                }
             }
 
             if out.is_empty() {
@@ -486,7 +518,7 @@ impl DiskDriver {
     ///     let outputs = recvd?;
     ///     let Step::Value(outputs) = outputs else { break; };
     ///     for output in outputs {
-    ///         println!("{}: size={}", output.rkey, output.data.len());
+    ///         println!("{}: size={}", output.key, output.data.len());
     ///     }
     ///
     /// }

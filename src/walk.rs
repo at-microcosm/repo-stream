@@ -2,7 +2,7 @@
 
 use crate::link::{NodeThing, ObjectLink, ThingKind};
 use crate::mst::{Depth, MstNode};
-use crate::{Bytes, HashMap, Rkey, disk::DiskStore, block::MaybeProcessedBlock, noop};
+use crate::{Bytes, HashMap, RepoPath, disk::DiskStore, block::MaybeProcessedBlock, noop};
 use cid::Cid;
 use std::convert::Infallible;
 
@@ -17,11 +17,9 @@ pub enum WalkError {
     MstError(#[from] MstError),
     #[error("storage error: {0}")]
     StorageError(#[from] fjall::Error),
-    #[error("block not found: {0:?}")]
-    MissingBlock(Box<NodeThing>),
 }
 
-/// Errors from invalid Rkeys
+/// Errors from invalid repo path keys
 #[derive(Debug, PartialEq, thiserror::Error)]
 pub enum MstError {
     #[error("Nodes cannot be empty (except for an entirely empty MST)")]
@@ -30,16 +28,25 @@ pub enum MstError {
     WrongDepth { depth: Depth, expected: Depth },
     #[error("MST depth underflow: depth-0 node with child trees")]
     DepthUnderflow,
-    #[error("Encountered rkey {rkey:?} which cannot follow the previous: {prev:?}")]
-    RkeyOutOfOrder { prev: Rkey, rkey: Rkey },
+    #[error("Encountered key {key:?} which cannot follow the previous: {prev:?}")]
+    KeyOutOfOrder { prev: RepoPath, key: RepoPath },
+}
+
+/// An item yielded by `Walker::step`.
+#[derive(Debug, PartialEq)]
+pub enum WalkItem {
+    /// A record with its (processed) block data.
+    Record(Output),
+    /// A record whose block was absent from the loaded blocks.
+    MissingRecord { key: RepoPath, cid: Cid },
+    /// A child subtree whose root block was absent; its key range is unknown.
+    MissingSubtree { cid: Cid },
 }
 
 /// Walker outputs
-///
-/// TODO: rename to "Record" or "Entry" or something
 #[derive(Debug, PartialEq)]
 pub struct Output<T = Bytes> {
-    pub rkey: Rkey, // TODO: aaa it's not really rkey, it's just "key" (or split to collection/rkey??)
+    pub key: RepoPath,
     pub cid: Cid,
     pub data: T,
 }
@@ -47,25 +54,8 @@ pub struct Output<T = Bytes> {
 #[derive(Debug, PartialEq)]
 pub enum Step<T = Output> {
     Value(T),
-    End(Option<Rkey>),
+    End(Option<RepoPath>),
 }
-
-// #[derive(Debug, PartialEq)]
-// pub struct LowStep {
-//     pub cid: Cid,
-//     pub kind: LowKind,
-// }
-
-// #[derive(Debug, PartialEq)]
-// pub enum LowKind {
-//     Node {
-//         children: Option<Vec<NodeThing>>,
-//     },
-//     Record {
-//         key: Rkey,
-//         data: Option<Bytes>,
-//     },
-// }
 
 /// Traverser of an atproto MST
 ///
@@ -73,7 +63,7 @@ pub enum Step<T = Output> {
 #[derive(Debug, Clone)]
 pub struct Walker {
     links: usize,
-    prev_rkey: Rkey,
+    prev_key: RepoPath,
     root_depth: Depth,
     todo: Vec<Vec<NodeThing>>,
 }
@@ -82,7 +72,7 @@ impl Walker {
     pub fn new(root_node: MstNode) -> Self {
         Self {
             links: 0,
-            prev_rkey: "".to_string(),
+            prev_key: "".to_string(),
             root_depth: root_node.depth.unwrap_or(0), // empty root node = empty mst
             todo: vec![root_node.things],
         }
@@ -95,23 +85,23 @@ impl Walker {
         process: impl Fn(Bytes) -> Bytes,
     ) -> Result<Option<Output>, WalkError> {
         match thing.kind {
-            ThingKind::Record(rkey) => {
+            ThingKind::Record(key) => {
                 let data = match mpb {
                     MaybeProcessedBlock::Raw(data) => process(data.clone()),
                     MaybeProcessedBlock::Processed(t) => t.clone(),
                 };
 
-                if rkey <= self.prev_rkey {
-                    return Err(WalkError::MstError(MstError::RkeyOutOfOrder {
-                        rkey,
-                        prev: self.prev_rkey.clone(),
+                if key <= self.prev_key {
+                    return Err(WalkError::MstError(MstError::KeyOutOfOrder {
+                        key,
+                        prev: self.prev_key.clone(),
                     }));
                 }
-                self.prev_rkey = rkey.clone();
+                self.prev_key = key.clone();
 
-                log::trace!("val @ {rkey}");
+                log::trace!("val @ {key}");
                 Ok(Some(Output {
-                    rkey,
+                    key,
                     cid: thing.link.into(),
                     data,
                 }))
@@ -162,91 +152,61 @@ impl Walker {
         None
     }
 
-    /// Advance through nodes until we find a record or can't go further
+    /// Advance one step through the MST.
+    ///
+    /// Returns `Ok(Some(item))` for each block encountered (record, missing
+    /// record, or missing subtree), or `Ok(None)` when traversal is complete.
+    /// Only errors on structural MST violations (wrong depth, out-of-order keys).
     pub fn step(
         &mut self,
         blocks: &HashMap<ObjectLink, MaybeProcessedBlock>,
         process: impl Fn(Bytes) -> Bytes,
-    ) -> Result<Step, WalkError> {
-        while let Some(NodeThing { link, kind }) = self.next_todo() {
-            let Some(mpb) = blocks.get(&link) else {
-                return Err(WalkError::MissingBlock(NodeThing { link, kind }.into()));
+    ) -> Result<Option<WalkItem>, WalkError> {
+        while let Some(thing) = self.next_todo() {
+            let Some(mpb) = blocks.get(&thing.link) else {
+                return Ok(Some(match thing.kind {
+                    ThingKind::Record(key) => {
+                        WalkItem::MissingRecord { key, cid: thing.link.into() }
+                    }
+                    ThingKind::ChildNode => WalkItem::MissingSubtree { cid: thing.link.into() },
+                }));
             };
-            if let Some(out) = self.mpb_step(NodeThing { link, kind }, mpb, &process)? {
-                return Ok(Step::Value(out));
+            if let Some(out) = self.mpb_step(thing, mpb, &process)? {
+                return Ok(Some(WalkItem::Record(out)));
             }
         }
         log::debug!("total links: {}", self.links);
-        Ok(Step::End(None))
+        Ok(None)
     }
 
-    // /// Emit every step including MST nodes
-    // pub fn step_low(
-    //     &mut self,
-    //     blocks: &HashMap<ObjectLink, MaybeProcessedBlock>,
-    //     process: impl Fn(Bytes) -> Bytes,
-    // ) -> Result<Option<LowStep>, WalkError> {
-    //     let Some(NodeThing { link, kind }) = self.next_todo() else {
-    //         return Ok(None);
-    //     };
-    //     let Some(mpb) = blocks.get(&link) else {
-
-    //     }
-    // }
-
-    /// Advance through nodes, allowing for missing records
-    pub fn step_sparse(
-        &mut self,
-        blocks: &HashMap<ObjectLink, MaybeProcessedBlock>,
-        process: impl Fn(Bytes) -> Bytes,
-    ) -> Result<Step<Output<Option<Bytes>>>, WalkError> {
-        while let Some(NodeThing { link, kind }) = self.next_todo() {
-            let mut dummy = false;
-            let mpb = match blocks.get(&link) {
-                Some(mpb) => mpb,
-                None => {
-                    if let ThingKind::Record(_) = kind {
-                        dummy = true;
-                        &MaybeProcessedBlock::Processed(vec![])
-                    } else {
-                        continue;
-                    }
-                }
-            };
-            if let Some(out) = self.mpb_step(NodeThing { link, kind }, mpb, |bytes| {
-                if dummy { bytes } else { process(bytes) }
-            })? {
-                // eprintln!(" ----- {}", out.rkey);
-                return Ok(Step::Value(Output {
-                    cid: out.cid,
-                    rkey: out.rkey,
-                    data: if dummy { None } else { Some(out.data) },
-                }));
-            }
-        }
-        Ok(Step::End(None))
-    }
-
+    /// Advance past leading missing blocks to find the first present record.
+    ///
+    /// Returns the key of the last missing *record* encountered before the
+    /// first present record — i.e., the `prev_key` for a CAR slice's leading
+    /// edge. After this returns, the next `step` call yields the first present
+    /// record (or `None` if the whole tree is absent).
     pub fn step_to_edge(
         &mut self,
         blocks: &HashMap<ObjectLink, MaybeProcessedBlock>,
-    ) -> Result<Option<Rkey>, WalkError> {
+    ) -> Result<Option<RepoPath>, WalkError> {
         let mut ant = self.clone();
-        let mut rkey_prev = None;
+        let mut prev_key = None;
         loop {
-            match ant.step(blocks, noop) {
-                Err(WalkError::MissingBlock(thing)) => {
-                    if let ThingKind::Record(rkey) = thing.kind {
-                        rkey_prev = Some(rkey);
-                    }
+            match ant.step(blocks, noop)? {
+                Some(WalkItem::Record(_)) => {
+                    // ant went one step too far; self holds the leading-edge position
+                    return Ok(prev_key);
+                }
+                Some(WalkItem::MissingRecord { key, .. }) => {
+                    prev_key = Some(key);
                     *self = ant;
                     ant = self.clone();
                 }
-                Err(anyother) => return Err(anyother),
-                Ok(z) => {
-                    log::info!("apparently we are too far at {z:?}");
-                    return Ok(rkey_prev); // oop real record, mutant went too far
+                Some(WalkItem::MissingSubtree { .. }) => {
+                    *self = ant;
+                    ant = self.clone();
                 }
+                None => return Ok(prev_key),
             }
         }
     }
@@ -257,7 +217,7 @@ impl Walker {
     /// only loading child nodes on the path to `target`. O(depth × branching_factor).
     ///
     /// After this returns `Ok(())`, the next call to `step` will yield the first record
-    /// at or after `target`, or `Step::End` if no such record exists.
+    /// at or after `target`, or `None` if no such record exists.
     pub fn seek(
         &mut self,
         target: &str,
@@ -267,7 +227,7 @@ impl Walker {
         enum SeekStep {
             Done,
             EmptyLevel,
-            SkipRecord(Rkey),
+            SkipRecord(RepoPath),
             SkipSubtree,
             Descend,
         }
@@ -310,7 +270,7 @@ impl Walker {
                 }
                 SeekStep::SkipRecord(key) => {
                     self.todo.last_mut().unwrap().pop();
-                    self.prev_rkey = key;
+                    self.prev_key = key;
                 }
                 SeekStep::SkipSubtree => {
                     self.todo.last_mut().unwrap().pop();
@@ -320,7 +280,9 @@ impl Walker {
                     // Note: self.todo borrow released before push below
 
                     let Some(mpb) = blocks.get(&child.link) else {
-                        return Err(WalkError::MissingBlock(child.into()));
+                        // Missing subtree on the seek path; skip it and continue
+                        // (seek is best-effort for sparse trees)
+                        continue;
                     };
                     let MaybeProcessedBlock::Raw(data) = mpb else {
                         return Err(WalkError::BadCommitFingerprint);
@@ -351,21 +313,26 @@ impl Walker {
         }
     }
 
-    /// blocking!!!!!!
+    /// blocking!!!!!
     pub fn disk_step(
         &mut self,
         blocks: &DiskStore,
         process: impl Fn(Bytes) -> Bytes,
-    ) -> Result<Step, WalkError> {
-        while let Some(NodeThing { link, kind }) = self.next_todo() {
-            let Some(block_slice) = blocks.get(&link.to_bytes())? else {
-                return Err(WalkError::MissingBlock(NodeThing { link, kind }.into()));
+    ) -> Result<Option<WalkItem>, WalkError> {
+        while let Some(thing) = self.next_todo() {
+            let Some(block_slice) = blocks.get(&thing.link.to_bytes())? else {
+                return Ok(Some(match thing.kind {
+                    ThingKind::Record(key) => {
+                        WalkItem::MissingRecord { key, cid: thing.link.into() }
+                    }
+                    ThingKind::ChildNode => WalkItem::MissingSubtree { cid: thing.link.into() },
+                }));
             };
             let mpb = MaybeProcessedBlock::from_bytes(block_slice.to_vec());
-            if let Some(out) = self.mpb_step(NodeThing { link, kind }, &mpb, &process)? {
-                return Ok(Step::Value(out));
+            if let Some(out) = self.mpb_step(thing, &mpb, &process)? {
+                return Ok(Some(WalkItem::Record(out)));
             }
         }
-        Ok(Step::End(None))
+        Ok(None)
     }
 }

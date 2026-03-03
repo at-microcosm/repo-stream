@@ -26,8 +26,8 @@ async fn main() -> Result<()> {
         "\nthis slice is from {}, repo rev {}",
         mem_car.commit.did, mem_car.commit.rev
     );
-    if let Some(rkey) = &mem_car.prev_rkey {
-        println!("  -> key immediately before CAR slice: {rkey}");
+    if let Some(key) = &mem_car.prev_key {
+        println!("  -> key immediately before CAR slice: {key}");
     } else {
         println!(
             "  -> no key preceeding the CAR slice, so it includes the leading edge of the tree."
@@ -38,12 +38,12 @@ async fn main() -> Result<()> {
     let end = loop {
         match mem_car.next_chunk(256)? {
             Step::Value(chunk) => {
-                for Output { cid, rkey, .. } in chunk {
+                for Output { cid, key, .. } in chunk {
                     print!("  SHA256 ");
                     for byte in cid.to_bytes().iter().skip(4).take(5) {
                         print!("{byte:02x}");
                     }
-                    println!("...\t{rkey}");
+                    println!("...\t{key}");
                 }
             }
             Step::End(e) => break e,
@@ -51,8 +51,8 @@ async fn main() -> Result<()> {
     };
 
     println!("done walking records present in the slice.");
-    if let Some(rkey) = end {
-        println!("  -> key immediately after CAR slice: {rkey}");
+    if let Some(key) = end {
+        println!("  -> key immediately after CAR slice: {key}");
     } else {
         println!(
             "  -> no key proceeding the CAR slice, so it includes the trailing edge of the tree."

@@ -13,7 +13,7 @@ async fn test_car_slice(
     expected_records: usize,
     expected_sum: usize,
     expect_preceeding: Option<&str>,
-    expect_rkey: Option<&str>,
+    expect_key: Option<&str>,
     expect_proceeding: Option<&str>,
 ) {
     let mut mem_car = match DriverBuilder::new()
@@ -26,29 +26,29 @@ async fn test_car_slice(
         Err(e) => panic!("{e}"),
     };
 
-    assert_eq!(mem_car.prev_rkey.as_deref(), expect_preceeding);
+    assert_eq!(mem_car.prev_key.as_deref(), expect_preceeding);
 
     let mut found_records = 0;
     let mut sum = 0;
-    let mut found_expected_rkey = false;
-    let mut prev_rkey = "".to_string();
+    let mut found_expected_key = false;
+    let mut prev_key = "".to_string();
 
     loop {
         match mem_car.next_chunk(256).unwrap() {
             Step::Value(records) => {
-                for Output { rkey, cid: _, data } in records {
+                for Output { key, cid: _, data } in records {
                     found_records += 1;
 
                     let (int_bytes, _) = data.split_at(size_of::<usize>());
                     let size = usize::from_ne_bytes(int_bytes.try_into().unwrap());
 
                     sum += size;
-                    if Some(rkey.as_str()) == expect_rkey {
-                        found_expected_rkey = true;
+                    if Some(key.as_str()) == expect_key {
+                        found_expected_key = true;
                     }
-                    eprintln!("!!!! {rkey}");
-                    assert!(rkey > prev_rkey, "rkeys are streamed in order");
-                    prev_rkey = rkey;
+                    eprintln!("!!!! {key}");
+                    assert!(key > prev_key, "keys are streamed in order");
+                    prev_key = key;
                 }
             }
             Step::End(proceeding) => {
@@ -60,10 +60,10 @@ async fn test_car_slice(
 
     assert_eq!(found_records, expected_records);
     if expected_records > 0 {
-        assert!(found_expected_rkey);
+        assert!(found_expected_key);
         assert_eq!(sum, expected_sum);
     } else {
-        assert!(!found_expected_rkey);
+        assert!(!found_expected_key);
     }
 }
 

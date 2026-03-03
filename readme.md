@@ -32,7 +32,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // if all blocks fit within memory
         Ok(mut mem_car) => {
             while let Step::Value(chunk) = mem_car.next_chunk(256)? {
-                for Output { rkey: _, cid: _, data } in chunk {
+                for Output { key: _, cid: _, data } in chunk {
                     let size = usize::from_ne_bytes(<[u8; 8]>::try_from(data).unwrap());
                     total_size += size;
                 }
@@ -44,10 +44,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // set up a disk store we can spill to
             let store = DiskBuilder::new().open("some/path.db".into()).await?;
             // do the spilling, get back a disk driver
-            let (_commit, _prev_rkey, mut driver) = partial.finish_loading(store).await?;
+            let (_commit, _prev_key, mut driver) = partial.finish_loading(store).await?;
 
             while let Step::Value(chunk) = driver.next_chunk(256).await? {
-                for Output { rkey: _, cid: _, data } in chunk {
+                for Output { key: _, cid: _, data } in chunk {
                     let size = usize::from_ne_bytes(<[u8; 8]>::try_from(data).unwrap());
                     total_size += size;
                 }

@@ -9,7 +9,7 @@ A `block_processor` function can be provided for tasks where records are
 transformed into a smaller representation to save memory.
 
 Once blocks are loaded, the MST is walked and emitted as chunks of
-`(rkey, cid, processed_block)` records in left-to-right order.
+`(key, cid, processed_block)` records in left-to-right order.
 
 Some MST validations are applied:
 - Keys must appear in order
@@ -86,11 +86,11 @@ pub use block::noop;
 pub use drive::{DriveError, DriverBuilder, LoadError, MemCar, PartialCar};
 pub use link::NodeThing;
 pub use mst::Commit;
-pub use walk::{Output, Step, WalkError};
+pub use walk::{Output, Step, WalkError, WalkItem};
 
 pub type Bytes = Vec<u8>;
 
-pub type Rkey = String;
+pub type RepoPath = String;
 
 #[cfg(feature = "hashbrown")]
 pub(crate) use hashbrown::HashMap;

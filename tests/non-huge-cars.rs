@@ -22,21 +22,21 @@ async fn test_car(
     let mut records = 0;
     let mut sum = 0;
     let mut found_bsky_profile = false;
-    let mut prev_rkey = "".to_string();
+    let mut prev_key = "".to_string();
 
     while let Step::Value(pairs) = mem_car.next_chunk(256).unwrap() {
-        for Output { rkey, cid: _, data } in pairs {
+        for Output { key, cid: _, data } in pairs {
             records += 1;
 
             let (int_bytes, _) = data.split_at(size_of::<usize>());
             let size = usize::from_ne_bytes(int_bytes.try_into().unwrap());
 
             sum += size;
-            if rkey == "app.bsky.actor.profile/self" {
+            if key == "app.bsky.actor.profile/self" {
                 found_bsky_profile = true;
             }
-            assert!(rkey > prev_rkey, "rkeys are streamed in order");
-            prev_rkey = rkey;
+            assert!(key > prev_key, "keys are streamed in order");
+            prev_key = key;
         }
     }
 
