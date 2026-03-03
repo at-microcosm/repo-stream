@@ -4,7 +4,7 @@ Read a CAR file with in-memory processing
 
 extern crate repo_stream;
 use clap::Parser;
-use repo_stream::{Driver, DriverBuilder, Output, Step};
+use repo_stream::{DriverBuilder, Output, Step};
 use std::path::PathBuf;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -23,26 +23,17 @@ async fn main() -> Result<()> {
     let reader = tokio::fs::File::open(file).await?;
     let reader = tokio::io::BufReader::new(reader);
 
-    let (commit, mut driver) = match DriverBuilder::new()
+    let mut mem_car = DriverBuilder::new()
         .with_mem_limit_mb(1000)
         .with_block_processor(|block| block.len().to_ne_bytes().to_vec())
         .load_car(reader)
-        .await?
-    {
-        Driver::Memory(commit, _, mem_driver) => (commit, mem_driver),
-        Driver::Disk(_) => panic!("this example doesn't handle big CARs"),
-    };
+        .await?;
 
-    log::info!("got commit: {commit:?}");
+    log::info!("got commit: {:?}", mem_car.commit);
 
-    while let Step::Value(records) = driver.next_chunk(256).await? {
-        for Output { rkey, cid, data } in records {
-            // let size = usize::from_ne_bytes(data.try_into().unwrap());
-            // print!("0x");
-            // for byte in cid.to_bytes() {
-            //     print!("{byte:>02x}");
-            // }
-            // println!(": {rkey} => record of len {}", size);
+    while let Step::Value(records) = mem_car.next_chunk(256)? {
+        for Output { rkey: _, cid: _, data: _ } in records {
+            // process records
         }
     }
 

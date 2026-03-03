@@ -2,7 +2,7 @@
 
 use crate::link::{NodeThing, ObjectLink, ThingKind};
 use crate::mst::{Depth, MstNode};
-use crate::{Bytes, HashMap, Rkey, disk::DiskStore, drive::MaybeProcessedBlock, noop};
+use crate::{Bytes, HashMap, Rkey, disk::DiskStore, block::MaybeProcessedBlock, noop};
 use cid::Cid;
 use std::convert::Infallible;
 
@@ -86,129 +86,6 @@ impl Walker {
             root_depth: root_node.depth.unwrap_or(0), // empty root node = empty mst
             todo: vec![root_node.things],
         }
-    }
-
-    pub fn viz(
-        &self,
-        blocks: &HashMap<ObjectLink, MaybeProcessedBlock>,
-        root_link: ObjectLink,
-    ) -> Result<(), WalkError> {
-        let root_block = blocks.get(&root_link).ok_or(WalkError::MissingBlock(
-            NodeThing {
-                link: root_link.clone(),
-                kind: ThingKind::ChildNode,
-            }
-            .into(),
-        ))?;
-
-        let root_node: MstNode = match root_block {
-            MaybeProcessedBlock::Processed(_) => return Err(WalkError::BadCommitFingerprint),
-            MaybeProcessedBlock::Raw(bytes) => serde_ipld_dagcbor::from_slice(bytes)?,
-        };
-
-        let mut positions = HashMap::new();
-        let mut w = Walker::new(root_node.clone());
-
-        let mut pos_idx = 0;
-        while let Step::Value(Output { rkey, .. }) = w.step_sparse(blocks, noop)? {
-            positions.insert(rkey, pos_idx);
-            pos_idx += 1;
-        }
-
-        Self::vnext(
-            root_node.depth.unwrap(),
-            vec![root_link],
-            blocks,
-            &positions,
-        )?;
-
-        Ok(())
-    }
-
-    pub fn vnext(
-        level: u32,
-        links: Vec<ObjectLink>,
-        blocks: &HashMap<ObjectLink, MaybeProcessedBlock>,
-        positions: &HashMap<Rkey, usize>,
-    ) -> Result<Vec<usize>, WalkError> {
-        let mut offsets = Vec::new();
-        let mut level_keys = Vec::new();
-        let mut child_links = Vec::new();
-
-        for link in links {
-            println!(
-                "\n{level}~{}..",
-                link.to_bytes()
-                    .iter()
-                    .take(5)
-                    .map(|c| format!("{c:02x}"))
-                    .collect::<Vec<_>>()
-                    .join("")
-            );
-
-            let Some(mpb) = blocks.get(&link) else {
-                // TODO: drop an 'x' for missing node
-                continue;
-            };
-            let node: MstNode = match mpb {
-                MaybeProcessedBlock::Processed(_) => return Err(WalkError::BadCommitFingerprint),
-                MaybeProcessedBlock::Raw(bytes) => serde_ipld_dagcbor::from_slice(bytes)?,
-            };
-
-            let mut last_key = "".to_string();
-            let mut last_was_record = true;
-            for thing in node.things {
-                let mut node_keys = Vec::new();
-
-                let has = blocks.contains_key(&thing.link);
-
-                match thing.kind {
-                    ThingKind::ChildNode => {
-                        if has {
-                            child_links.push(thing.link);
-                            last_was_record = false;
-                        }
-                    }
-                    ThingKind::Record(key) => {
-                        let us = positions[&key];
-
-                        if !last_was_record && last_key.is_empty() {
-                            let them = positions[&last_key];
-                            for i in 0..(them - 1) {
-                                if i < (us + 1) {
-                                    print!("  ");
-                                } else {
-                                    print!("~~");
-                                }
-                            }
-                            println!("~");
-                        }
-
-                        for _ in 0..us {
-                            print!("  ");
-                        }
-                        if has {
-                            print!("O");
-                        } else {
-                            print!("x");
-                        }
-                        println!(" {key}");
-                        node_keys.push(key.clone());
-                        last_key = key;
-                        last_was_record = true;
-                    }
-                }
-                level_keys.push(node_keys);
-            }
-
-            offsets.push(1);
-        }
-
-        if !child_links.is_empty() {
-            Self::vnext(level - 1, child_links, blocks, positions)?; // TODO use offsets
-        }
-
-        Ok(offsets)
     }
 
     fn mpb_step(
@@ -369,6 +246,106 @@ impl Walker {
                 Ok(z) => {
                     log::info!("apparently we are too far at {z:?}");
                     return Ok(rkey_prev); // oop real record, mutant went too far
+                }
+            }
+        }
+    }
+
+    /// Skip forward to the first record at or after `target`, without emitting anything.
+    ///
+    /// Uses the tree structure to skip entire subtrees that are provably before `target`,
+    /// only loading child nodes on the path to `target`. O(depth × branching_factor).
+    ///
+    /// After this returns `Ok(())`, the next call to `step` will yield the first record
+    /// at or after `target`, or `Step::End` if no such record exists.
+    pub fn seek(
+        &mut self,
+        target: &str,
+        blocks: &HashMap<ObjectLink, MaybeProcessedBlock>,
+    ) -> Result<(), WalkError> {
+        // Classify what to do next without holding a borrow through the action
+        enum SeekStep {
+            Done,
+            EmptyLevel,
+            SkipRecord(Rkey),
+            SkipSubtree,
+            Descend,
+        }
+
+        loop {
+            let next = match self.todo.last() {
+                None => return Ok(()),
+                Some(level) => {
+                    let n = level.len();
+                    if n == 0 {
+                        SeekStep::EmptyLevel
+                    } else {
+                        match &level[n - 1].kind {
+                            ThingKind::Record(k) if k.as_str() >= target => SeekStep::Done,
+                            ThingKind::Record(k) => SeekStep::SkipRecord(k.clone()),
+                            ThingKind::ChildNode => {
+                                // The right-bounding record for this child node is at n-2.
+                                // All keys in this subtree are < right_bound, so we can skip
+                                // the whole subtree if right_bound <= target.
+                                let can_skip = n >= 2
+                                    && matches!(
+                                        &level[n - 2].kind,
+                                        ThingKind::Record(k) if k.as_str() <= target
+                                    );
+                                if can_skip {
+                                    SeekStep::SkipSubtree
+                                } else {
+                                    SeekStep::Descend
+                                }
+                            }
+                        }
+                    }
+                }
+            }; // borrow of self.todo released here
+
+            match next {
+                SeekStep::Done => return Ok(()),
+                SeekStep::EmptyLevel => {
+                    self.todo.pop();
+                }
+                SeekStep::SkipRecord(key) => {
+                    self.todo.last_mut().unwrap().pop();
+                    self.prev_rkey = key;
+                }
+                SeekStep::SkipSubtree => {
+                    self.todo.last_mut().unwrap().pop();
+                }
+                SeekStep::Descend => {
+                    let child = self.todo.last_mut().unwrap().pop().unwrap();
+                    // Note: self.todo borrow released before push below
+
+                    let Some(mpb) = blocks.get(&child.link) else {
+                        return Err(WalkError::MissingBlock(child.into()));
+                    };
+                    let MaybeProcessedBlock::Raw(data) = mpb else {
+                        return Err(WalkError::BadCommitFingerprint);
+                    };
+                    let node: MstNode =
+                        serde_ipld_dagcbor::from_slice(data).map_err(WalkError::BadCommit)?;
+                    if node.is_empty() {
+                        return Err(WalkError::MstError(MstError::EmptyNode));
+                    }
+                    // Depth validation mirrors mpb_step: todo still has the (possibly empty)
+                    // parent level, so todo.len()-1 is the parent's depth delta from root.
+                    let current_depth = self.root_depth - (self.todo.len() - 1) as u32;
+                    let next_depth = current_depth
+                        .checked_sub(1)
+                        .ok_or(MstError::DepthUnderflow)?;
+                    if let Some(d) = node.depth
+                        && d != next_depth
+                    {
+                        return Err(WalkError::MstError(MstError::WrongDepth {
+                            depth: d,
+                            expected: next_depth,
+                        }));
+                    }
+                    self.links += node.things.len();
+                    self.todo.push(node.things);
                 }
             }
         }

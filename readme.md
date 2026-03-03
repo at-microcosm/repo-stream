@@ -11,7 +11,7 @@ A robust CAR file -> MST walker for atproto
 [sponsor-badge]: https://img.shields.io/badge/at-microcosm-b820f9?labelColor=b820f9&logo=githubsponsors&logoColor=fff
 
 ```rust no_run
-use repo_stream::{Driver, DriverBuilder, DriveError, DiskBuilder, Output, Step};
+use repo_stream::{DriverBuilder, LoadError, DiskBuilder, Output, Step};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -27,33 +27,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_block_processor( // block processing: just extract the raw record size
           |rec| rec.len().to_ne_bytes().to_vec())
         .load_car(reader)
-        .await?
+        .await
     {
-
         // if all blocks fit within memory
-        Driver::Memory(_commit, _prev_rkey, mut driver) => {
-            while let Step::Value(chunk) = driver.next_chunk(256).await? {
+        Ok(mut mem_car) => {
+            while let Step::Value(chunk) = mem_car.next_chunk(256)? {
                 for Output { rkey: _, cid: _, data } in chunk {
-                    let size = usize::from_ne_bytes(data.try_into().unwrap());
+                    let size = usize::from_ne_bytes(<[u8; 8]>::try_from(data).unwrap());
                     total_size += size;
                 }
             }
         },
 
         // if the CAR was too big for in-memory processing
-        Driver::Disk(paused) => {
+        Err(LoadError::MemoryLimitReached(partial)) => {
             // set up a disk store we can spill to
             let store = DiskBuilder::new().open("some/path.db".into()).await?;
-            // do the spilling, get back a (similar) driver
-            let (_commit, _prev_rkey, mut driver) = paused.finish_loading(store).await?;
+            // do the spilling, get back a disk driver
+            let (_commit, _prev_rkey, mut driver) = partial.finish_loading(store).await?;
 
             while let Step::Value(chunk) = driver.next_chunk(256).await? {
                 for Output { rkey: _, cid: _, data } in chunk {
-                    let size = usize::from_ne_bytes(data.try_into().unwrap());
+                    let size = usize::from_ne_bytes(<[u8; 8]>::try_from(data).unwrap());
                     total_size += size;
                 }
             }
         }
+
+        Err(e) => return Err(e.into()),
     };
     println!("sum of size of all records: {total_size}");
     Ok(())
@@ -71,6 +72,12 @@ some ideas
 - [ ] since the disk k/v get/set interface is now so similar to HashMap (blocking, no transactions,), it's probably possible to make a single `Driver` and move the thread stuff from the disk one to generic helper functions. (might create async footguns though)
 - [ ] fork iroh-car into a sync version so we can drop tokio as a hard requirement, and offer async via wrapper helper things
 - [ ] feature-flag the sha2 crate for hmac-sha256? if someone wanted fewer deps?? then maybe make `hashbrown` also optional vs builtin hashmap?
+
+
+## contributing
+
+see ['./hacking.md'](./hacking.md)
+
 
 -----
 

@@ -9,7 +9,7 @@ use mimalloc::MiMalloc;
 static GLOBAL: MiMalloc = MiMalloc;
 
 use clap::Parser;
-use repo_stream::{DiskBuilder, Driver, DriverBuilder, Step};
+use repo_stream::{DiskBuilder, DriverBuilder, LoadError, Step};
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -37,33 +37,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // in this example we only bother handling CARs that are too big for memory
     // `noop` helper means: do no block processing, store the raw blocks
-    let driver = match DriverBuilder::new()
+    let partial = match DriverBuilder::new()
         .with_mem_limit_mb(32) // how much memory can be used before disk spill
         .load_car(reader)
-        .await?
+        .await
     {
-        Driver::Memory(_, _, _) => panic!("try this on a bigger car"),
-        Driver::Disk(big_stuff) => {
-            // we reach here if the repo was too big and needs to be spilled to
-            // disk to continue
-
-            // set up a disk store we can spill to
-            let disk_store = DiskBuilder::new().open(tmpfile).await?;
-
-            // do the spilling, get back a (similar) driver
-            let (commit, _, driver) = big_stuff.finish_loading(disk_store).await?;
-
-            // at this point you might want to fetch the account's signing key
-            // via the DID from the commit, and then verify the signature.
-            log::warn!("big's comit ({:?}): {:?}", t0.elapsed(), commit);
-
-            // log::info!("now is good time to check mem usage...");
-            // tokio::time::sleep(std::time::Duration::from_secs(15)).await;
-
-            // pop the driver back out to get some code indentation relief
-            driver
-        }
+        Ok(_mem_car) => panic!("try this on a bigger car"),
+        Err(LoadError::MemoryLimitReached(partial)) => partial,
+        Err(e) => return Err(e.into()),
     };
+
+    // set up a disk store we can spill to
+    let disk_store = DiskBuilder::new().open(tmpfile).await?;
+
+    // do the spilling, get back a disk driver
+    let (commit, _, driver) = partial.finish_loading(disk_store).await?;
+
+    // at this point you might want to fetch the account's signing key
+    // via the DID from the commit, and then verify the signature.
+    log::warn!("big's commit ({:?}): {:?}", t0.elapsed(), commit);
 
     // collect some random stats about the blocks
     let mut n = 0;

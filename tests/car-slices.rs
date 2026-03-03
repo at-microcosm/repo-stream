@@ -1,5 +1,5 @@
 extern crate repo_stream;
-use repo_stream::{Driver, Output, Step};
+use repo_stream::{DriverBuilder, LoadError, Output, Step};
 
 const RECORD_SLICE: &'static [u8] = include_bytes!("../car-samples/slice-one.car");
 const RECORD_NODE_FIRST_KEY: &'static [u8] =
@@ -16,27 +16,25 @@ async fn test_car_slice(
     expect_rkey: Option<&str>,
     expect_proceeding: Option<&str>,
 ) {
-    let (mut driver, before) = match Driver::load_car(
-        bytes,
-        |block| block.len().to_ne_bytes().to_vec(),
-        10, /* MiB */
-    )
-    .await
-    .unwrap()
+    let mut mem_car = match DriverBuilder::new()
+        .with_block_processor(|block| block.len().to_ne_bytes().to_vec())
+        .load_car(bytes)
+        .await
     {
-        Driver::Memory(_commit, before, mem_driver) => (mem_driver, before),
-        Driver::Disk(_) => panic!("too big"),
+        Ok(mc) => mc,
+        Err(LoadError::MemoryLimitReached(_)) => panic!("too big"),
+        Err(e) => panic!("{e}"),
     };
 
-    assert_eq!(before.as_deref(), expect_preceeding);
+    assert_eq!(mem_car.prev_rkey.as_deref(), expect_preceeding);
 
     let mut found_records = 0;
     let mut sum = 0;
     let mut found_expected_rkey = false;
     let mut prev_rkey = "".to_string();
 
-    while let Ok(step) = driver.next_chunk(256).await {
-        match step {
+    loop {
+        match mem_car.next_chunk(256).unwrap() {
             Step::Value(records) => {
                 for Output { rkey, cid: _, data } in records {
                     found_records += 1;

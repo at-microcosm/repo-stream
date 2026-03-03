@@ -3,7 +3,7 @@ Read a CAR slice in memory and show some info about it.
 */
 
 extern crate repo_stream;
-use repo_stream::{Driver, DriverBuilder, Output, Step};
+use repo_stream::{DriverBuilder, LoadError, Output, Step};
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
@@ -12,20 +12,21 @@ async fn main() -> Result<()> {
     env_logger::init();
     let reader = tokio::io::BufReader::new(tokio::io::stdin());
 
-    let (commit, prev_rkey, mut driver) = match DriverBuilder::new()
+    let mut mem_car = match DriverBuilder::new()
         .with_block_processor(|block| block.len().to_ne_bytes().to_vec())
         .load_car(reader)
-        .await?
+        .await
     {
-        Driver::Memory(commit, prev, mem_driver) => (commit, prev, mem_driver),
-        Driver::Disk(_) => panic!("this example doesn't handle big CARs"),
+        Ok(mc) => mc,
+        Err(LoadError::MemoryLimitReached(_)) => panic!("this example doesn't handle big CARs"),
+        Err(e) => return Err(e.into()),
     };
 
     println!(
         "\nthis slice is from {}, repo rev {}",
-        commit.did, commit.rev
+        mem_car.commit.did, mem_car.commit.rev
     );
-    if let Some(rkey) = prev_rkey {
+    if let Some(rkey) = &mem_car.prev_rkey {
         println!("  -> key immediately before CAR slice: {rkey}");
     } else {
         println!(
@@ -35,7 +36,7 @@ async fn main() -> Result<()> {
 
     println!("included records:");
     let end = loop {
-        match driver.next_chunk(256).await? {
+        match mem_car.next_chunk(256)? {
             Step::Value(chunk) => {
                 for Output { cid, rkey, .. } in chunk {
                     print!("  SHA256 ");
