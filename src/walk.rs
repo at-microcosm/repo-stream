@@ -302,6 +302,61 @@ impl Walker {
         Ok(None)
     }
 
+    /// Like [`step`], but skips record block lookups entirely.
+    ///
+    /// Returns the key and CID of each record directly from the MST node entries.
+    /// MST node blocks are still fetched to traverse the tree structure.
+    ///
+    /// Returns `Err(WalkError::MissingNode)` if a child MST node block is absent.
+    pub fn step_keys(
+        &mut self,
+        blocks: &HashMap<ObjectLink, MaybeProcessedBlock>,
+    ) -> Result<Option<(RepoPath, Cid)>, WalkError> {
+        while let Some(NodeThing { link, kind }) = self.next_todo() {
+            match kind {
+                ThingKind::Record(key) => {
+                    if Some(&key) <= self.prev_key.as_ref() {
+                        return Err(WalkError::MstError(MstError::KeyOutOfOrder {
+                            key,
+                            prev: self.prev_key.clone().unwrap_or("[no prev key]".to_string()),
+                        }));
+                    }
+                    self.prev_key = Some(key.clone());
+                    return Ok(Some((key, link.into())));
+                }
+                ThingKind::ChildNode => {
+                    let Some(mpb) = blocks.get(&link) else {
+                        return Err(WalkError::MissingNode {
+                            cid: Box::new(link.into()),
+                        });
+                    };
+                    let MaybeProcessedBlock::Raw(data) = mpb else {
+                        return Err(WalkError::BadCommitFingerprint);
+                    };
+                    let node: MstNode =
+                        serde_ipld_dagcbor::from_slice(data).map_err(WalkError::BadCommit)?;
+                    if node.is_empty() {
+                        return Err(WalkError::MstError(MstError::EmptyNode));
+                    }
+                    let current_layer = self.root_layer - (self.todo.len() - 1) as u32;
+                    let next_layer = current_layer
+                        .checked_sub(1)
+                        .ok_or(MstError::LayerUnderflow)?;
+                    if let Some(d) = node.layer
+                        && d != next_layer
+                    {
+                        return Err(WalkError::MstError(MstError::WrongLayer {
+                            layer: d,
+                            expected: next_layer,
+                        }));
+                    }
+                    self.todo.push(node.things);
+                }
+            }
+        }
+        Ok(None)
+    }
+
     /// Skip forward to the first record at or after `target`, without emitting anything.
     ///
     /// Uses the tree structure to skip entire subtrees that are provably before `target`,

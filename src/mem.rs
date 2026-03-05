@@ -280,6 +280,38 @@ impl MemCar {
         self.walker.step_with_nodes(&self.blocks, self.process)
     }
 
+    /// Get the next key and CID from the walk, without fetching record blocks.
+    ///
+    /// Record CIDs come directly from MST node entries — record blocks are never
+    /// looked up. MST node blocks are still fetched to traverse the tree.
+    ///
+    /// Returns `Ok(None)` when the walk is complete. Returns
+    /// `Err(WalkError::MissingNode)` if a child MST node block is absent.
+    pub fn next_keys(&mut self) -> Result<Option<(RepoPath, Cid)>, WalkError> {
+        self.walker.step_keys(&self.blocks)
+    }
+
+    /// Collect up to `n` key+CID pairs, without fetching record blocks.
+    ///
+    /// Like [`next_keys`] but collects up to `n` pairs in one call.
+    ///
+    /// Returns `Ok(None)` when the walk is complete. Returns
+    /// `Err(WalkError::MissingNode)` if a child MST node block is absent.
+    pub fn next_chunk_keys(&mut self, n: usize) -> Result<Option<Vec<(RepoPath, Cid)>>, WalkError> {
+        let mut out = Vec::with_capacity(n);
+        for _ in 0..n {
+            match self.walker.step_keys(&self.blocks)? {
+                Some(pair) => out.push(pair),
+                None => break,
+            }
+        }
+        if out.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(out))
+        }
+    }
+
     /// Collect up to `n` items (records, missing items, and node blocks).
     ///
     /// Like [`next_chunk`] but also includes `WalkItem::Node`. The chunk
