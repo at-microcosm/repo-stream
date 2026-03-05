@@ -49,6 +49,10 @@ harness = false
 name = "huge-car"
 harness = false
 
+[[bench]]
+name = "collections"
+harness = false
+
 # [[bench]]
 # name = "leading"
 # harness = false

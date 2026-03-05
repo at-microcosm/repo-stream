@@ -28,8 +28,10 @@ pub enum LoadError<R: AsyncRead + Unpin> {
     ///
     /// The partial state is returned so the caller can decide what to do
     /// (e.g. resume with disk storage via `PartialCar::finish_loading`).
+    ///
+    /// boxed because it's big, to avoid making normal load errors heavy
     #[error("partially loaded car")]
-    MemoryLimitReached(PartialCar<R>),
+    MemoryLimitReached(Box<PartialCar<R>>),
 }
 
 /// A partially memory-loaded CAR file that hit the memory limit mid-stream.
@@ -130,14 +132,14 @@ async fn load_car<R: AsyncRead + Unpin>(
         mem_blocks.insert(cid.into(), maybe_processed);
         if mem_size >= max_size {
             log::debug!("blocks loaded before memory limit: {block_count}");
-            return Err(LoadError::MemoryLimitReached(PartialCar {
+            return Err(LoadError::MemoryLimitReached(Box::new(PartialCar {
                 car,
                 root,
                 process,
                 max_size,
                 blocks: mem_blocks,
                 commit,
-            }));
+            })));
         }
     }
 
