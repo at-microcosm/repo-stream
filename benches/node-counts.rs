@@ -143,43 +143,52 @@ pub fn criterion_benchmark(c: &mut Criterion) {
         .build()
         .expect("Creating runtime failed");
 
-    // let cars = [
-    //     ("empty", EMPTY_CAR),
-    //     ("tiny", TINY_CAR),
-    //     ("little", LITTLE_CAR),
-    //     ("midsize", MIDSIZE_CAR),
-    // ];
+    let cars = [
+        ("empty", EMPTY_CAR),
+        ("tiny", TINY_CAR),
+        ("little", LITTLE_CAR),
+        ("midsize", MIDSIZE_CAR),
+    ];
 
-    // // Sanity-check: both approaches agree on record count.
-    // for (name, bytes) in cars {
-    //     let a = rt.block_on(count_records_filter(bytes));
-    //     let b = rt.block_on(count_records_separate(bytes));
-    //     assert_eq!(a, b, "approaches disagree on record count for {name}");
-    //     let (records, nodes) = rt.block_on(count_records_and_nodes(bytes));
-    //     println!("{name}: {records} records, {nodes} nodes");
-    // }
+    // Sanity-check: both approaches agree on record count.
+    for (name, bytes) in cars {
+        let a = rt.block_on(count_records_filter(bytes));
+        let b = rt.block_on(count_records_separate(bytes));
+        assert_eq!(a, b, "approaches disagree on record count for {name}");
+        let (records, nodes) = rt.block_on(count_records_and_nodes(bytes));
+        println!("{name}: {records} records, {nodes} nodes");
+    }
 
-    // let mut group = c.benchmark_group("node-counts");
+    let mut group = c.benchmark_group("node-counts");
 
-    // for (name, bytes) in cars {
-    //     group.bench_with_input(
-    //         BenchmarkId::new("records-filter-approach", name),
-    //         bytes,
-    //         |b, bytes| b.to_async(&rt).iter(async || count_records_filter(bytes).await),
-    //     );
-    //     group.bench_with_input(
-    //         BenchmarkId::new("records-separate-approach", name),
-    //         bytes,
-    //         |b, bytes| b.to_async(&rt).iter(async || count_records_separate(bytes).await),
-    //     );
-    //     group.bench_with_input(
-    //         BenchmarkId::new("records-and-nodes", name),
-    //         bytes,
-    //         |b, bytes| b.to_async(&rt).iter(async || count_records_and_nodes(bytes).await),
-    //     );
-    // }
+    for (name, bytes) in cars {
+        group.bench_with_input(
+            BenchmarkId::new("records-filter-approach", name),
+            bytes,
+            |b, bytes| {
+                b.to_async(&rt)
+                    .iter(async || count_records_filter(bytes).await)
+            },
+        );
+        group.bench_with_input(
+            BenchmarkId::new("records-separate-approach", name),
+            bytes,
+            |b, bytes| {
+                b.to_async(&rt)
+                    .iter(async || count_records_separate(bytes).await)
+            },
+        );
+        group.bench_with_input(
+            BenchmarkId::new("records-and-nodes", name),
+            bytes,
+            |b, bytes| {
+                b.to_async(&rt)
+                    .iter(async || count_records_and_nodes(bytes).await)
+            },
+        );
+    }
 
-    // group.finish();
+    group.finish();
 
     if let Ok(huge_car) = std::env::var("HUGE_CAR") {
         let path: std::path::PathBuf = huge_car.into();

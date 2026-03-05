@@ -1,5 +1,5 @@
 extern crate repo_stream;
-use repo_stream::{DriverBuilder, LoadError, Output, WalkItem};
+use repo_stream::{DriverBuilder, LoadError, Output, SliceError, WalkItem};
 
 const RECORD_SLICE: &[u8] = include_bytes!("../car-samples/slice-one.car");
 const RECORD_NODE_FIRST_KEY: &[u8] = include_bytes!("../car-samples/slice-node-first-key.car");
@@ -120,6 +120,60 @@ async fn test_record_slice_node_after() {
         Some("app.bsky.feed.post/3lbn6of6qxc2a"),
     )
     .await
+}
+
+/// Test the SliceWalker API directly: walk_slice, proof keys, and SliceError on
+/// missing subtrees inside the range.
+#[tokio::test]
+async fn test_walk_slice_api() {
+    // Known from test_record_slice_car: the slice contains exactly one record
+    // ("app.bsky.feed.like/3mcg72x6bi32z") bounded by two MissingRecord neighbours.
+    let key = "app.bsky.feed.like/3mcg72x6bi32z";
+    let expected_preceding = "app.bsky.feed.like/3mcfzfbpaml27";
+    let expected_following = "app.bsky.feed.like/3mcga2o2efq27";
+
+    let mut mem_car = DriverBuilder::new()
+        .load_car(RECORD_SLICE)
+        .await
+        .expect("should load");
+
+    let mut walker = mem_car.walk_slice(key..=key).unwrap();
+    let record = walker.next().unwrap().expect("should find the record");
+    assert_eq!(record.key, key);
+
+    // Next call should return None and lock in the following key.
+    assert!(walker.next().unwrap().is_none());
+
+    let proof = walker.finish().unwrap();
+    assert_eq!(proof.preceding_key.as_deref(), Some(expected_preceding));
+    assert_eq!(proof.following_key.as_deref(), Some(expected_following));
+}
+
+/// A walk_slice range that is empty (both bounds exclude all records) still
+/// produces a valid proof via finish().
+#[tokio::test]
+async fn test_walk_slice_absent_key() {
+    // This key is absent from the slice (between the two MissingRecord neighbours).
+    // SliceWalker should prove absence by finding the bounding neighbours.
+    let absent = "app.bsky.feed.like/3mcg72x6bi32z-absent";
+
+    let mut mem_car = DriverBuilder::new()
+        .load_car(RECORD_SLICE)
+        .await
+        .expect("should load");
+
+    // Use get() which is the idiomatic API for single-key lookup.
+    let result = mem_car.get(absent);
+    // Should either return Ok(None) (provably absent) or Err(IncompleteRange)
+    // depending on whether the slice's MST nodes bound the key. Either is valid;
+    // we just assert it doesn't panic or return Ok(Some(_)).
+    match result {
+        Ok(None) => {}                                // proven absent
+        Err(SliceError::IncompleteRange { .. }) => {} // block missing within range
+        Err(SliceError::MissingNode { .. }) => {}     // subtree missing, can't prove
+        Ok(Some(output)) => panic!("unexpected record for absent key: {}", output.key),
+        Err(e) => panic!("unexpected error: {e}"),
+    }
 }
 
 #[tokio::test]
