@@ -3,9 +3,10 @@
 use crate::{
     Bytes, HashMap, RepoPath,
     disk::{DiskDriver, DiskError, DiskStore, DriveError, make_disk_driver},
-    mst::{Commit, MstNode, ObjectLink},
+    mst::{Commit, ObjectLink},
     walk::{MaybeProcessedBlock, Output, WalkError, WalkItem, Walker},
 };
+use cid::Cid;
 use iroh_car::CarReader;
 use std::convert::Infallible;
 use thiserror::Error;
@@ -148,19 +149,20 @@ async fn load_car<R: AsyncRead + Unpin>(
 
     let commit = commit.ok_or(LoadError::MissingCommit)?;
 
-    let root_node: MstNode = match mem_blocks
+    let (root_node, root_bytes) = match mem_blocks
         .get(&commit.data)
         .ok_or(LoadError::MissingCommit)?
     {
         MaybeProcessedBlock::Processed(_) => Err(WalkError::BadCommitFingerprint)?,
-        MaybeProcessedBlock::Raw(bytes) => serde_ipld_dagcbor::from_slice(bytes)?,
+        MaybeProcessedBlock::Raw(bytes) => (serde_ipld_dagcbor::from_slice(bytes)?, bytes.clone()),
     };
+    let root_cid: Cid = commit.data.clone().into();
 
     Ok(MemCar {
         commit,
         prev_key: None,
         blocks: mem_blocks,
-        walker: Walker::new(root_node),
+        walker: Walker::new(root_node, root_cid, root_bytes),
         process,
     })
 }
@@ -233,6 +235,7 @@ impl MemCar {
             Some(WalkItem::MissingSubtree { cid }) => {
                 Err(WalkError::MissingNode { cid: Box::new(cid) })
             }
+            Some(WalkItem::Node { .. }) => unreachable!("step() never emits Node items"),
         }
     }
 
@@ -256,6 +259,38 @@ impl MemCar {
                 Some(WalkItem::MissingSubtree { cid }) => {
                     return Err(WalkError::MissingNode { cid: Box::new(cid) });
                 }
+                Some(WalkItem::Node { .. }) => unreachable!("step() never emits Node items"),
+            }
+        }
+        if out.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(out))
+        }
+    }
+
+    /// Walk the MST emitting records, missing items, **and** MST node blocks.
+    ///
+    /// Like [`next`] but also yields `WalkItem::Node` for every node descended
+    /// into (root first, then children in traversal order). Useful for collecting
+    /// or counting the raw node blocks alongside records.
+    ///
+    /// Note: node bytes are cloned on each descent — see [`Walker::step_with_nodes`].
+    pub fn next_with_nodes(&mut self) -> Result<Option<WalkItem>, WalkError> {
+        self.walker.step_with_nodes(&self.blocks, self.process)
+    }
+
+    /// Collect up to `n` items (records, missing items, and node blocks).
+    ///
+    /// Like [`next_chunk`] but also includes `WalkItem::Node`. The chunk
+    /// size counts all item types, so a chunk of 256 may contain fewer records
+    /// than a [`next_chunk`] call of 256.
+    pub fn next_chunk_with_nodes(&mut self, n: usize) -> Result<Option<Vec<WalkItem>>, WalkError> {
+        let mut out = Vec::with_capacity(n);
+        for _ in 0..n {
+            match self.walker.step_with_nodes(&self.blocks, self.process)? {
+                Some(item) => out.push(item),
+                None => break,
             }
         }
         if out.is_empty() {
@@ -345,11 +380,12 @@ impl<R: AsyncRead + Unpin> PartialCar<R> {
             .map_err(|e| DriveError::StorageError(DiskError::DbError(e)))?
             .ok_or(DriveError::MissingCommit)?;
 
-        let node: MstNode = match MaybeProcessedBlock::from_bytes(db_bytes.to_vec()) {
+        let root_cid: Cid = commit.data.clone().into();
+        let (node, root_bytes) = match MaybeProcessedBlock::from_bytes(db_bytes.to_vec()) {
             MaybeProcessedBlock::Processed(_) => Err(WalkError::BadCommitFingerprint)?,
-            MaybeProcessedBlock::Raw(bytes) => serde_ipld_dagcbor::from_slice(&bytes)?,
+            MaybeProcessedBlock::Raw(bytes) => (serde_ipld_dagcbor::from_slice(&bytes)?, bytes),
         };
-        let walker = Walker::new(node);
+        let walker = Walker::new(node, root_cid, root_bytes);
 
         Ok((commit, None, make_disk_driver(store, walker, self.process)))
     }

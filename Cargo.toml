@@ -53,6 +53,10 @@ harness = false
 name = "collections"
 harness = false
 
+[[bench]]
+name = "node-counts"
+harness = false
+
 # [[bench]]
 # name = "leading"
 # harness = false

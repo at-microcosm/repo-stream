@@ -291,6 +291,9 @@ impl DiskDriver {
                             return (state, Err(DriveError::MissingBlock(Box::new(cid))));
                         }
                         Ok(None) => break,
+                        Ok(Some(WalkItem::Node { .. })) => {
+                            unreachable!("disk_step never emits Node items")
+                        }
                     }
                 }
 
@@ -328,6 +331,9 @@ impl DiskDriver {
                         return tx.blocking_send(Err(DriveError::MissingBlock(Box::new(cid))));
                     }
                     Ok(None) => break,
+                    Ok(Some(WalkItem::Node { .. })) => {
+                        unreachable!("disk_step never emits Node items")
+                    }
                 }
             }
 

@@ -52,7 +52,7 @@ async fn main() -> Result<()> {
                         trailing = Some(key);
                     }
                 }
-                WalkItem::MissingSubtree { .. } => {}
+                WalkItem::MissingSubtree { .. } | WalkItem::Node { .. } => {}
             }
         }
     }

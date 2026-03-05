@@ -68,7 +68,7 @@ async fn test_car_slice(
                         trailing = Some(key);
                     }
                 }
-                WalkItem::MissingSubtree { .. } => {}
+                WalkItem::MissingSubtree { .. } | WalkItem::Node { .. } => {}
             }
         }
     }

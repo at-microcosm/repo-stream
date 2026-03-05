@@ -101,6 +101,8 @@ pub enum MstError {
 /// An item yielded by `Walker::step`.
 #[derive(Debug, PartialEq)]
 pub enum WalkItem {
+    /// A raw MST node block (root first, then each child as it is descended into).
+    Node { cid: Cid, data: Bytes },
     /// A record with its (processed) block data.
     Record(Output),
     /// A record whose block was absent from the loaded blocks.
@@ -125,14 +127,17 @@ pub struct Walker {
     pub(crate) prev_key: Option<RepoPath>,
     pub(crate) root_layer: Layer,
     pub(crate) todo: Vec<Vec<NodeThing>>,
+    /// The root MST node block, emitted as the first `WalkItem::Node` before any records.
+    pending_root: Option<(Cid, Bytes)>,
 }
 
 impl Walker {
-    pub fn new(root_node: MstNode) -> Self {
+    pub fn new(root_node: MstNode, root_cid: Cid, root_bytes: Bytes) -> Self {
         Self {
             prev_key: None,
             root_layer: root_node.layer.unwrap_or(0), // empty root node = empty mst
             todo: vec![root_node.things],
+            pending_root: Some((root_cid, root_bytes)),
         }
     }
 
@@ -212,6 +217,13 @@ impl Walker {
     /// Returns `Ok(Some(item))` for each block encountered (record, missing
     /// record, or missing subtree), or `Ok(None)` when traversal is complete.
     /// Only errors on structural MST violations (wrong layer, out-of-order keys).
+    /// Advance one step through the MST.
+    ///
+    /// Returns `Ok(Some(item))` for each block encountered (record, missing
+    /// record, or missing subtree), or `Ok(None)` when traversal is complete.
+    /// Only errors on structural MST violations (wrong layer, out-of-order keys).
+    ///
+    /// MST node blocks are **not** emitted; use [`step_with_nodes`] for that.
     pub fn step(
         &mut self,
         blocks: &HashMap<ObjectLink, MaybeProcessedBlock>,
@@ -231,6 +243,60 @@ impl Walker {
             };
             if let Some(out) = self.mpb_step(thing, mpb, &process)? {
                 return Ok(Some(WalkItem::Record(out)));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Like [`step`], but also emits `WalkItem::Node` for every MST node block
+    /// that is descended into (root first, then children in traversal order).
+    ///
+    /// Node bytes are cloned from the in-memory block map on each descent, so
+    /// this is measurably more expensive than [`step`] for large trees.
+    pub fn step_with_nodes(
+        &mut self,
+        blocks: &HashMap<ObjectLink, MaybeProcessedBlock>,
+        process: impl Fn(Bytes) -> Bytes,
+    ) -> Result<Option<WalkItem>, WalkError> {
+        // Emit the root MST node block before any records.
+        if let Some((cid, data)) = self.pending_root.take() {
+            return Ok(Some(WalkItem::Node { cid, data }));
+        }
+
+        while let Some(thing) = self.next_todo() {
+            let Some(mpb) = blocks.get(&thing.link) else {
+                return Ok(Some(match thing.kind {
+                    ThingKind::Record(key) => WalkItem::MissingRecord {
+                        key,
+                        cid: thing.link.into(),
+                    },
+                    ThingKind::ChildNode => WalkItem::MissingSubtree {
+                        cid: thing.link.into(),
+                    },
+                }));
+            };
+
+            // Capture what we need to emit a Node item after mpb_step consumes `thing`.
+            let child_link = if matches!(thing.kind, ThingKind::ChildNode) {
+                Some(thing.link.clone())
+            } else {
+                None
+            };
+
+            if let Some(out) = self.mpb_step(thing, mpb, &process)? {
+                return Ok(Some(WalkItem::Record(out)));
+            }
+
+            // mpb_step returns None only for ChildNode descent; emit the node block.
+            // This clones the raw bytes — the main cost of step_with_nodes vs step.
+            if let Some(link) = child_link {
+                let MaybeProcessedBlock::Raw(data) = mpb else {
+                    unreachable!("mpb_step already errored on Processed ChildNode");
+                };
+                return Ok(Some(WalkItem::Node {
+                    cid: link.into(),
+                    data: data.clone(),
+                }));
             }
         }
         Ok(None)

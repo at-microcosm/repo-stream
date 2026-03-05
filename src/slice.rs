@@ -80,6 +80,7 @@ impl<'a> SliceWalker<'a> {
                     done = true;
                     break;
                 }
+                Some(WalkItem::Node { .. }) => unreachable!("step() never emits Node"),
                 Some(WalkItem::MissingSubtree { .. }) => {
                     // Boundary subtree entirely before the range — safe to skip.
                 }
@@ -146,35 +147,38 @@ impl<'a> SliceWalker<'a> {
             return Ok(Some(out));
         }
 
-        match self.mem_car.next()? {
-            None => {
-                self.done = true;
-                validate_upper(self.following_key.as_deref(), &self.upper)?;
-                Ok(None)
-            }
-            Some(WalkItem::MissingSubtree { cid }) => {
-                // Any missing subtree after the range starts is an error:
-                // we can't prove the range is complete without it.
-                Err(SliceError::MissingNode { cid })
-            }
-            Some(WalkItem::MissingRecord { key, cid }) => {
-                if is_after(&key, &self.upper) {
-                    self.following_key = Some(key);
+        loop {
+            match self.mem_car.next()? {
+                None => {
                     self.done = true;
                     validate_upper(self.following_key.as_deref(), &self.upper)?;
-                    Ok(None)
-                } else {
-                    Err(SliceError::IncompleteRange { key, cid })
+                    return Ok(None);
                 }
-            }
-            Some(WalkItem::Record(out)) => {
-                if is_after(&out.key, &self.upper) {
-                    self.following_key = Some(out.key);
-                    self.done = true;
-                    validate_upper(self.following_key.as_deref(), &self.upper)?;
-                    Ok(None)
-                } else {
-                    Ok(Some(out))
+                Some(WalkItem::Node { .. }) => unreachable!("step() never emits Node"),
+                Some(WalkItem::MissingSubtree { cid }) => {
+                    // Any missing subtree after the range starts is an error:
+                    // we can't prove the range is complete without it.
+                    return Err(SliceError::MissingNode { cid });
+                }
+                Some(WalkItem::MissingRecord { key, cid }) => {
+                    if is_after(&key, &self.upper) {
+                        self.following_key = Some(key);
+                        self.done = true;
+                        validate_upper(self.following_key.as_deref(), &self.upper)?;
+                        return Ok(None);
+                    } else {
+                        return Err(SliceError::IncompleteRange { key, cid });
+                    }
+                }
+                Some(WalkItem::Record(out)) => {
+                    if is_after(&out.key, &self.upper) {
+                        self.following_key = Some(out.key);
+                        self.done = true;
+                        validate_upper(self.following_key.as_deref(), &self.upper)?;
+                        return Ok(None);
+                    } else {
+                        return Ok(Some(out));
+                    }
                 }
             }
         }
