@@ -1,7 +1,7 @@
 //! Load a CAR file into memory and walk its MST
 
 use crate::{
-    Bytes, HashMap, RepoPath, Step,
+    Bytes, HashMap, RepoPath,
     disk::{DiskDriver, DiskError, DiskStore, DriveError, make_disk_driver},
     mst::{Commit, MstNode, ObjectLink},
     walk::{MaybeProcessedBlock, Output, WalkError, WalkItem, Walker},
@@ -161,7 +161,6 @@ async fn load_car<R: AsyncRead + Unpin>(
         blocks: mem_blocks,
         walker: Walker::new(root_node),
         process,
-        trailing_key: None,
     })
 }
 
@@ -171,94 +170,97 @@ pub struct MemCar {
     pub commit: Commit,
     /// For CAR slices: the key of the last record before this slice's leading edge.
     /// `None` if this slice (or full CAR) starts from the leftmost record in the tree.
+    /// Not set automatically — callers may derive it from leading `MissingRecord` items.
     pub prev_key: Option<RepoPath>,
     pub blocks: HashMap<ObjectLink, MaybeProcessedBlock>,
     walker: Walker,
     process: fn(Bytes) -> Bytes,
-    /// `None` = no gap encountered yet; `Some(k)` = trailing edge determined.
-    trailing_key: Option<Option<RepoPath>>,
 }
 
 impl MemCar {
     /// Seek forward to the first record at or after `target`.
     ///
     /// Uses the MST structure to skip entire subtrees efficiently.
-    /// After this returns, the next `next` or `next_chunk` call will start at or after `target`.
+    /// After this returns, the next call to `next*` will start at or after `target`.
     pub fn seek(&mut self, target: &str) -> Result<(), WalkError> {
         self.walker.seek(target, &self.blocks)
     }
 
-    /// Walk forward past any gaps to determine the trailing edge key.
-    fn find_trailing_edge(&mut self) -> Result<Option<RepoPath>, WalkError> {
-        let trailing = loop {
-            match self.walker.step(&self.blocks, self.process)? {
-                Some(WalkItem::Record(r)) => break Some(r.key),
-                Some(WalkItem::MissingRecord { key, .. }) => break Some(key),
-                Some(WalkItem::MissingSubtree { .. }) => continue,
-                None => break None,
-            }
-        };
-        self.trailing_key = Some(trailing.clone());
-        Ok(trailing)
-    }
-
-    /// Get the next record.
+    /// Get the next item from the walk.
     ///
-    /// Returns `Step::Value(output)` for each record in key order, then
-    /// `Step::End(None)` at the end of a full CAR, or `Step::End(Some(key))`
-    /// for CAR slices where `key` is the first key immediately after the slice.
+    /// Returns all `WalkItem` variants as-is, including `MissingRecord` and
+    /// `MissingSubtree` for sparse trees and CAR slices. Returns `Ok(None)`
+    /// when the walk is complete.
     ///
     /// TODO: make this an implementation of Iterator
-    pub fn next(&mut self) -> Result<Step, WalkError> {
-        if let Some(trailing) = &self.trailing_key {
-            return Ok(Step::End(trailing.clone()));
-        }
-        match self.walker.step(&self.blocks, self.process)? {
-            Some(WalkItem::Record(out)) => Ok(Step::Value(out)),
-            Some(WalkItem::MissingRecord { key, .. }) => {
-                self.trailing_key = Some(Some(key.clone()));
-                Ok(Step::End(Some(key)))
-            }
-            Some(WalkItem::MissingSubtree { .. }) => {
-                let trailing = self.find_trailing_edge()?;
-                Ok(Step::End(trailing))
-            }
-            None => {
-                self.trailing_key = Some(None);
-                Ok(Step::End(None))
-            }
-        }
+    pub fn next(&mut self) -> Result<Option<WalkItem>, WalkError> {
+        self.walker.step(&self.blocks, self.process)
     }
 
-    /// Iterate up to `n` records in key order.
+    /// Collect up to `n` walk items.
     ///
-    /// Returns `Step::Value(records)` while records remain, then `Step::End(next_key)`
-    /// where `next_key` is the first key after the slice (for CAR slices), or `None`.
-    pub fn next_chunk(&mut self, n: usize) -> Result<Step<Vec<Output>>, WalkError> {
-        if let Some(trailing) = &self.trailing_key {
-            return Ok(Step::End(trailing.clone()));
-        }
+    /// Like `next`, passes through `MissingRecord` and `MissingSubtree` items.
+    /// Returns `Ok(None)` when the walk is complete.
+    pub fn next_chunk(&mut self, n: usize) -> Result<Option<Vec<WalkItem>>, WalkError> {
         let mut out = Vec::with_capacity(n);
         for _ in 0..n {
             match self.walker.step(&self.blocks, self.process)? {
-                Some(WalkItem::Record(record)) => out.push(record),
-                Some(WalkItem::MissingRecord { key, .. }) => {
-                    self.trailing_key = Some(Some(key.clone()));
-                    return Ok(Step::Value(out)); // may be empty
-                }
-                Some(WalkItem::MissingSubtree { .. }) => {
-                    let trailing = self.find_trailing_edge()?;
-                    self.trailing_key = Some(trailing);
-                    return Ok(Step::Value(out)); // may be empty
-                }
+                Some(item) => out.push(item),
                 None => break,
             }
         }
         if out.is_empty() {
-            self.trailing_key = Some(None);
-            Ok(Step::End(None))
+            Ok(None)
         } else {
-            Ok(Step::Value(out))
+            Ok(Some(out))
+        }
+    }
+
+    /// Get the next present record, erroring if any block is absent.
+    ///
+    /// Returns `Ok(None)` when the walk is complete. Returns
+    /// `Err(WalkError::MissingBlock)` if a record block is absent, or
+    /// `Err(WalkError::MissingNode)` if an MST node block is absent.
+    pub fn next_strict(&mut self) -> Result<Option<Output>, WalkError> {
+        match self.walker.step(&self.blocks, self.process)? {
+            None => Ok(None),
+            Some(WalkItem::Record(out)) => Ok(Some(out)),
+            Some(WalkItem::MissingRecord { key, cid }) => Err(WalkError::MissingBlock {
+                key,
+                cid: Box::new(cid),
+            }),
+            Some(WalkItem::MissingSubtree { cid }) => {
+                Err(WalkError::MissingNode { cid: Box::new(cid) })
+            }
+        }
+    }
+
+    /// Collect up to `n` present records, erroring if any block is absent.
+    ///
+    /// Returns `Ok(None)` when the walk is complete. Returns
+    /// `Err(WalkError::MissingBlock)` if a record block is absent, or
+    /// `Err(WalkError::MissingNode)` if an MST node block is absent.
+    pub fn next_chunk_strict(&mut self, n: usize) -> Result<Option<Vec<Output>>, WalkError> {
+        let mut out = Vec::with_capacity(n);
+        for _ in 0..n {
+            match self.walker.step(&self.blocks, self.process)? {
+                None => break,
+                Some(WalkItem::Record(record)) => out.push(record),
+                Some(WalkItem::MissingRecord { key, cid }) => {
+                    return Err(WalkError::MissingBlock {
+                        key,
+                        cid: Box::new(cid),
+                    });
+                }
+                Some(WalkItem::MissingSubtree { cid }) => {
+                    return Err(WalkError::MissingNode { cid: Box::new(cid) });
+                }
+            }
+        }
+        if out.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(out))
         }
     }
 }

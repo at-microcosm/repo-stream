@@ -4,7 +4,7 @@ Read a CAR file with in-memory processing
 
 extern crate repo_stream;
 use clap::Parser;
-use repo_stream::{DriverBuilder, Output, Step};
+use repo_stream::{DriverBuilder, Output};
 use std::path::PathBuf;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -31,7 +31,7 @@ async fn main() -> Result<()> {
 
     log::info!("got commit: {:?}", mem_car.commit);
 
-    while let Step::Value(records) = mem_car.next_chunk(256)? {
+    while let Some(records) = mem_car.next_chunk_strict(256)? {
         for Output {
             key: _,
             cid: _,

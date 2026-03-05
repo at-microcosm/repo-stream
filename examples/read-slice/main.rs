@@ -3,7 +3,7 @@ Read a CAR slice in memory and show some info about it.
 */
 
 extern crate repo_stream;
-use repo_stream::{DriverBuilder, LoadError, Output, Step};
+use repo_stream::{DriverBuilder, LoadError, Output, WalkItem};
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
@@ -26,37 +26,49 @@ async fn main() -> Result<()> {
         "\nthis slice is from {}, repo rev {}",
         mem_car.commit.did, mem_car.commit.rev
     );
-    if let Some(key) = &mem_car.prev_key {
-        println!("  -> key immediately before CAR slice: {key}");
-    } else {
-        println!(
-            "  -> no key preceeding the CAR slice, so it includes the leading edge of the tree."
-        );
-    }
 
     println!("included records:");
-    let end = loop {
-        match mem_car.next_chunk(256)? {
-            Step::Value(chunk) => {
-                for Output { cid, key, .. } in chunk {
+
+    let mut preceding: Option<String> = None;
+    let mut trailing: Option<String> = None;
+    let mut after_records = false;
+
+    while let Some(items) = mem_car.next_chunk(256)? {
+        for item in items {
+            match item {
+                WalkItem::Record(Output { cid, key, .. }) => {
+                    after_records = true;
+                    trailing = None;
                     print!("  SHA256 ");
                     for byte in cid.to_bytes().iter().skip(4).take(5) {
                         print!("{byte:02x}");
                     }
                     println!("...\t{key}");
                 }
+                WalkItem::MissingRecord { key, .. } => {
+                    if !after_records {
+                        preceding = Some(key);
+                    } else if trailing.is_none() {
+                        trailing = Some(key);
+                    }
+                }
+                WalkItem::MissingSubtree { .. } => {}
             }
-            Step::End(e) => break e,
         }
-    };
+    }
 
     println!("done walking records present in the slice.");
-    if let Some(key) = end {
-        println!("  -> key immediately after CAR slice: {key}");
-    } else {
-        println!(
-            "  -> no key proceeding the CAR slice, so it includes the trailing edge of the tree."
-        );
+    match preceding {
+        Some(key) => println!("  -> key immediately before CAR slice: {key}"),
+        None => println!(
+            "  -> no key preceding the CAR slice, so it includes the leading edge of the tree."
+        ),
+    }
+    match trailing {
+        Some(key) => println!("  -> key immediately after CAR slice: {key}"),
+        None => println!(
+            "  -> no key following the CAR slice, so it includes the trailing edge of the tree."
+        ),
     }
 
     Ok(())

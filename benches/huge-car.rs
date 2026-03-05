@@ -1,5 +1,5 @@
 extern crate repo_stream;
-use repo_stream::{Driver, Step};
+use repo_stream::DriverBuilder;
 use std::path::{Path, PathBuf};
 
 use criterion::{Criterion, criterion_group, criterion_main};
@@ -32,13 +32,15 @@ async fn drive_car(filename: impl AsRef<Path>) -> usize {
     let reader = tokio::fs::File::open(filename).await.unwrap();
     let reader = tokio::io::BufReader::new(reader);
 
-    let mut driver = match Driver::load_car(reader, ser, 1024).await.unwrap() {
-        Driver::Memory(_, _, mem_driver) => mem_driver,
-        Driver::Disk(_) => panic!("not doing disk for benchmark"),
-    };
+    let mut driver = DriverBuilder::new()
+        .with_mem_limit_mb(1024)
+        .with_block_processor(ser)
+        .load_car(reader)
+        .await
+        .unwrap();
 
     let mut n = 0;
-    while let Step::Value(pairs) = driver.next_chunk(256).await.unwrap() {
+    while let Some(pairs) = driver.next_chunk(256).unwrap() {
         n += pairs.len();
     }
     n

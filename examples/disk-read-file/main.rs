@@ -9,7 +9,7 @@ use mimalloc::MiMalloc;
 static GLOBAL: MiMalloc = MiMalloc;
 
 use clap::Parser;
-use repo_stream::{DiskBuilder, DriverBuilder, LoadError, Step};
+use repo_stream::{DiskBuilder, DriverBuilder, LoadError};
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -66,11 +66,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // this example uses the disk driver's channel mode: the tree walking is
     // spawned onto a blocking thread, and we get chunks of rkey+blocks back
     let (mut rx, join) = driver.to_channel(512);
-    while let Some(step) = rx.recv().await {
-        let step = step?;
-        let Step::Value(outputs) = step else {
-            break;
-        };
+    while let Some(outputs) = rx.recv().await {
+        let outputs = outputs?;
 
         // keep a count of the total number of blocks seen
         n += outputs.len();

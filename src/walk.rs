@@ -70,6 +70,15 @@ pub enum WalkError {
     MstError(#[from] MstError),
     #[error("storage error: {0}")]
     StorageError(#[from] fjall::Error),
+    /// Returned by `next_strict`/`next_chunk_strict` when a record block is absent.
+    #[error("record block absent: key={key:?} cid={cid}")]
+    MissingBlock {
+        key: crate::RepoPath,
+        cid: Box<cid::Cid>,
+    },
+    /// Returned by `next_strict`/`next_chunk_strict` when an MST node block is absent.
+    #[error("MST node block absent: cid={cid}")]
+    MissingNode { cid: Box<cid::Cid> },
 }
 
 /// Errors from invalid repo path keys
@@ -106,12 +115,6 @@ pub struct Output<T = Bytes> {
     pub key: RepoPath,
     pub cid: Cid,
     pub data: T,
-}
-
-#[derive(Debug, PartialEq)]
-pub enum Step<T = Output> {
-    Value(T),
-    End(Option<RepoPath>),
 }
 
 /// Walker: traverser of an atproto MST

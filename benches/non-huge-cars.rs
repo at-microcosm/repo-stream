@@ -1,5 +1,5 @@
 extern crate repo_stream;
-use repo_stream::{Driver, Step};
+use repo_stream::DriverBuilder;
 
 use criterion::{Criterion, criterion_group, criterion_main};
 
@@ -39,13 +39,15 @@ fn ser(block: Vec<u8>) -> Vec<u8> {
 }
 
 async fn drive_car(bytes: &[u8]) -> usize {
-    let mut driver = match Driver::load_car(bytes, ser, 32).await.unwrap() {
-        Driver::Memory(_, _, mem_driver) => mem_driver,
-        Driver::Disk(_) => panic!("not benching big cars here"),
-    };
+    let mut mem_car = DriverBuilder::new()
+        .with_mem_limit_mb(32)
+        .with_block_processor(ser)
+        .load_car(bytes)
+        .await
+        .unwrap();
 
     let mut n = 0;
-    while let Step::Value(pairs) = driver.next_chunk(256).await.unwrap() {
+    while let Some(pairs) = mem_car.next_chunk_strict(256).unwrap() {
         n += pairs.len();
     }
     n

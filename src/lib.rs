@@ -18,7 +18,7 @@ Some MST validations are applied:
 `iroh_car` additionally applies a block size limit of `2MiB`.
 
 ```
-use repo_stream::{DriverBuilder, Step};
+use repo_stream::DriverBuilder;
 
 # #[tokio::main]
 # async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -31,7 +31,7 @@ let mut mem_car = DriverBuilder::new()
     .load_car(reader)
     .await?;
 
-while let Step::Value(chunk) = mem_car.next_chunk(256)? {
+while let Some(chunk) = mem_car.next_chunk_strict(256)? {
     for output in chunk {
         let size = usize::from_ne_bytes(output.data.try_into().unwrap());
         total_size += size;
@@ -45,7 +45,7 @@ println!("sum of size of all records: {total_size}");
 If the CAR is too large for memory, handle the `MemoryLimitReached` error:
 
 ```no_run
-use repo_stream::{DriverBuilder, LoadError, Step};
+use repo_stream::{DriverBuilder, LoadError};
 
 # #[tokio::main]
 # async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -56,7 +56,7 @@ match DriverBuilder::new()
     .await
 {
     Ok(mut mem_car) => {
-        while let Step::Value(chunk) = mem_car.next_chunk(256)? {
+        while let Some(chunk) = mem_car.next_chunk_strict(256)? {
             // process records
         }
     }
@@ -82,7 +82,7 @@ pub mod walk;
 pub use disk::{DiskBuilder, DiskDriver, DiskError, DiskStore, DriveError};
 pub use mem::{DriverBuilder, LoadError, MemCar, PartialCar};
 pub use mst::Commit;
-pub use walk::{Output, Step, WalkError, WalkItem, noop};
+pub use walk::{Output, WalkError, WalkItem, noop};
 
 pub type Bytes = Vec<u8>;
 

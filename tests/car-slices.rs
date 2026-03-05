@@ -1,20 +1,26 @@
 extern crate repo_stream;
-use repo_stream::{DriverBuilder, LoadError, Output, Step};
+use repo_stream::{DriverBuilder, LoadError, Output, WalkItem};
 
-const RECORD_SLICE: &'static [u8] = include_bytes!("../car-samples/slice-one.car");
-const RECORD_NODE_FIRST_KEY: &'static [u8] =
-    include_bytes!("../car-samples/slice-node-first-key.car");
-const RECORD_NODE_AFTER: &'static [u8] = include_bytes!("../car-samples/slice-node-after.car");
-const RECORD_NODE_ABSENT: &'static [u8] =
-    include_bytes!("../car-samples/slice-proving-absence.car");
+const RECORD_SLICE: &[u8] = include_bytes!("../car-samples/slice-one.car");
+const RECORD_NODE_FIRST_KEY: &[u8] = include_bytes!("../car-samples/slice-node-first-key.car");
+const RECORD_NODE_AFTER: &[u8] = include_bytes!("../car-samples/slice-node-after.car");
+const RECORD_NODE_ABSENT: &[u8] = include_bytes!("../car-samples/slice-proving-absence.car");
 
+/// Walk a CAR slice and assert on:
+/// - `expect_preceding`: the last `MissingRecord` key before any present records
+///   (i.e. the key just before the slice's window)
+/// - `expected_records`: count of present records
+/// - `expected_sum`: sum of record sizes (via processor)
+/// - `expect_key`: a specific key that must appear among the present records
+/// - `expect_trailing`: the first `MissingRecord` key after the last present record
+///   (i.e. the key just after the slice's window)
 async fn test_car_slice(
     bytes: &[u8],
     expected_records: usize,
     expected_sum: usize,
-    expect_preceeding: Option<&str>,
+    expect_preceding: Option<&str>,
     expect_key: Option<&str>,
-    expect_proceeding: Option<&str>,
+    expect_trailing: Option<&str>,
 ) {
     let mut mem_car = match DriverBuilder::new()
         .with_block_processor(|block| block.len().to_ne_bytes().to_vec())
@@ -26,44 +32,54 @@ async fn test_car_slice(
         Err(e) => panic!("{e}"),
     };
 
-    assert_eq!(mem_car.prev_key.as_deref(), expect_preceeding);
-
     let mut found_records = 0;
     let mut sum = 0;
     let mut found_expected_key = false;
     let mut prev_key = "".to_string();
 
-    loop {
-        match mem_car.next_chunk(256).unwrap() {
-            Step::Value(records) => {
-                for Output { key, cid: _, data } in records {
+    // The last MissingRecord key seen before the first present record.
+    let mut preceding: Option<String> = None;
+    // The first MissingRecord key seen after the last present record.
+    let mut trailing: Option<String> = None;
+    let mut after_records = false;
+
+    while let Some(items) = mem_car.next_chunk(256).unwrap() {
+        for item in items {
+            match item {
+                WalkItem::Record(Output { key, cid: _, data }) => {
+                    after_records = true;
+                    trailing = None; // a later MissingRecord replaces this
                     found_records += 1;
 
                     let (int_bytes, _) = data.split_at(size_of::<usize>());
                     let size = usize::from_ne_bytes(int_bytes.try_into().unwrap());
-
                     sum += size;
+
                     if Some(key.as_str()) == expect_key {
                         found_expected_key = true;
                     }
-                    eprintln!("!!!! {key}");
                     assert!(key > prev_key, "keys are streamed in order");
                     prev_key = key;
                 }
-            }
-            Step::End(proceeding) => {
-                assert_eq!(proceeding.as_deref(), expect_proceeding);
-                break;
+                WalkItem::MissingRecord { key, .. } => {
+                    if !after_records {
+                        preceding = Some(key);
+                    } else if trailing.is_none() {
+                        trailing = Some(key);
+                    }
+                }
+                WalkItem::MissingSubtree { .. } => {}
             }
         }
     }
 
     assert_eq!(found_records, expected_records);
+    assert_eq!(preceding.as_deref(), expect_preceding);
+    assert_eq!(trailing.as_deref(), expect_trailing);
+
     if expected_records > 0 {
         assert!(found_expected_key);
         assert_eq!(sum, expected_sum);
-    } else {
-        assert!(!found_expected_key);
     }
 }
 
@@ -108,8 +124,10 @@ async fn test_record_slice_node_after() {
 
 #[tokio::test]
 async fn test_record_slice_proving_absence() {
-    // missing key is `app.bsky.feed.like/3lohfzs6qea23`
-    // NOTE: repo-stream output here isn't enough info for proof
+    // proves `app.bsky.feed.like/3lohfzs6qea23` is absent.
+    // the included MST nodes contain entries for neighbouring keys whose
+    // record blocks are not in this CAR — they surface as MissingRecord items.
+    // no present records; the last MissingRecord key seen is the neighbour.
     test_car_slice(
         RECORD_NODE_ABSENT,
         0,

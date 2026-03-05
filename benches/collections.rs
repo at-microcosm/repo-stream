@@ -1,5 +1,5 @@
 extern crate repo_stream;
-use repo_stream::{DriverBuilder, Step};
+use repo_stream::DriverBuilder;
 use std::collections::HashSet;
 use std::path::Path;
 
@@ -24,16 +24,11 @@ async fn collect_naive(bytes: &[u8]) -> Vec<String> {
 
     let mut seen = HashSet::new();
     let mut collections = vec![];
-    loop {
-        match mem_car.next_chunk(256).unwrap() {
-            Step::End(_) => break,
-            Step::Value(outputs) => {
-                for output in outputs {
-                    let collection = output.key.split_once('/').unwrap().0.to_string();
-                    if seen.insert(collection.clone()) {
-                        collections.push(collection);
-                    }
-                }
+    while let Some(outputs) = mem_car.next_chunk_strict(256).unwrap() {
+        for output in outputs {
+            let collection = output.key.split_once('/').unwrap().0.to_string();
+            if seen.insert(collection.clone()) {
+                collections.push(collection);
             }
         }
     }
@@ -55,9 +50,9 @@ async fn collect_seeking(bytes: &[u8]) -> Vec<String> {
 
     let mut collections = vec![];
     loop {
-        match mem_car.next().unwrap() {
-            Step::End(_) => break,
-            Step::Value(output) => {
+        match mem_car.next_strict().unwrap() {
+            None => break,
+            Some(output) => {
                 let collection = output.key.split_once('/').unwrap().0.to_string();
                 collections.push(collection.clone());
                 mem_car.seek(&format!("{collection}/{tilde_max}")).unwrap();
@@ -77,16 +72,11 @@ async fn collect_naive_file(path: &Path) -> Vec<String> {
 
     let mut seen = HashSet::new();
     let mut collections = vec![];
-    loop {
-        match mem_car.next_chunk(256).unwrap() {
-            Step::End(_) => break,
-            Step::Value(outputs) => {
-                for output in outputs {
-                    let collection = output.key.split_once('/').unwrap().0.to_string();
-                    if seen.insert(collection.clone()) {
-                        collections.push(collection);
-                    }
-                }
+    while let Some(outputs) = mem_car.next_chunk_strict(256).unwrap() {
+        for output in outputs {
+            let collection = output.key.split_once('/').unwrap().0.to_string();
+            if seen.insert(collection.clone()) {
+                collections.push(collection);
             }
         }
     }
@@ -104,9 +94,9 @@ async fn collect_seeking_file(path: &Path) -> Vec<String> {
 
     let mut collections = vec![];
     loop {
-        match mem_car.next().unwrap() {
-            Step::End(_) => break,
-            Step::Value(output) => {
+        match mem_car.next_strict().unwrap() {
+            None => break,
+            Some(output) => {
                 let collection = output.key.split_once('/').unwrap().0.to_string();
                 collections.push(collection.clone());
                 mem_car.seek(&format!("{collection}/{tilde_max}")).unwrap();

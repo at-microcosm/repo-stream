@@ -1,5 +1,5 @@
 extern crate repo_stream;
-use repo_stream::{DriverBuilder, Output, Step};
+use repo_stream::{DriverBuilder, Output};
 
 const EMPTY_CAR: &'static [u8] = include_bytes!("../car-samples/empty.car");
 const TINY_CAR: &'static [u8] = include_bytes!("../car-samples/tiny.car");
@@ -24,7 +24,7 @@ async fn test_car(
     let mut found_bsky_profile = false;
     let mut prev_key = "".to_string();
 
-    while let Step::Value(pairs) = mem_car.next_chunk(256).unwrap() {
+    while let Some(pairs) = mem_car.next_chunk_strict(256).unwrap() {
         for Output { key, cid: _, data } in pairs {
             records += 1;
 

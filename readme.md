@@ -11,7 +11,7 @@ A robust CAR file -> MST walker for atproto
 [sponsor-badge]: https://img.shields.io/badge/at-microcosm-b820f9?labelColor=b820f9&logo=githubsponsors&logoColor=fff
 
 ```rust no_run
-use repo_stream::{DriverBuilder, LoadError, DiskBuilder, Output, Step};
+use repo_stream::{DriverBuilder, LoadError, DiskBuilder, Output};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -31,7 +31,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         // if all blocks fit within memory
         Ok(mut mem_car) => {
-            while let Step::Value(chunk) = mem_car.next_chunk(256)? {
+            while let Some(chunk) = mem_car.next_chunk_strict(256)? {
                 for Output { key: _, cid: _, data } in chunk {
                     let size = usize::from_ne_bytes(<[u8; 8]>::try_from(data).unwrap());
                     total_size += size;
@@ -46,7 +46,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // do the spilling, get back a disk driver
             let (_commit, _prev_key, mut driver) = partial.finish_loading(store).await?;
 
-            while let Step::Value(chunk) = driver.next_chunk(256).await? {
+            while let Some(chunk) = driver.next_chunk(256).await? {
                 for Output { key: _, cid: _, data } in chunk {
                     let size = usize::from_ne_bytes(<[u8; 8]>::try_from(data).unwrap());
                     total_size += size;

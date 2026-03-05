@@ -15,7 +15,7 @@ let store = DiskBuilder::new()
 */
 
 use crate::{
-    Bytes, Step,
+    Bytes,
     mst::ThingKind,
     walk::{MaybeProcessedBlock, MstError, Output, WalkError, WalkItem, Walker},
 };
@@ -62,7 +62,7 @@ pub enum DriveError {
     #[error("Storage error: {0}")]
     StorageError(#[from] DiskError),
     #[error("Unexpected missing block: {0:?}")]
-    MissingBlock(cid::Cid),
+    MissingBlock(Box<cid::Cid>),
     #[error("Tried to send on a closed channel")]
     ChannelSendError,
     #[error("Failed to join a task: {0}")]
@@ -255,14 +255,17 @@ pub fn _get_fake_disk_driver() -> DiskDriver {
 }
 
 impl DiskDriver {
-    /// Walk the MST returning up to `n` key + record pairs
+    /// Walk the MST returning up to `n` key + record pairs.
+    ///
+    /// Returns `Ok(Some(outputs))` while records remain, `Ok(None)` when done.
+    /// Errors if any block is absent (disk path always expects all blocks present).
     ///
     /// ```no_run
-    /// # use repo_stream::{disk::{DiskDriver, DriveError, _get_fake_disk_driver}, Step};
+    /// # use repo_stream::disk::{DiskDriver, DriveError, _get_fake_disk_driver};
     /// # #[tokio::main]
     /// # async fn main() -> Result<(), DriveError> {
     /// # let mut disk_driver = _get_fake_disk_driver();
-    /// while let Step::Value(outputs) = disk_driver.next_chunk(256).await? {
+    /// while let Some(outputs) = disk_driver.next_chunk(256).await? {
     ///     for output in outputs {
     ///         println!("{}: size={}", output.key, output.data.len());
     ///     }
@@ -270,7 +273,7 @@ impl DiskDriver {
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn next_chunk(&mut self, n: usize) -> Result<Step<Vec<Output>>, DriveError> {
+    pub async fn next_chunk(&mut self, n: usize) -> Result<Option<Vec<Output>>, DriveError> {
         let process = self.process;
 
         let mut state = self.state.take().expect("DiskDriver must have Some(state)");
@@ -285,7 +288,7 @@ impl DiskDriver {
                         Ok(Some(WalkItem::Record(output))) => out.push(output),
                         Ok(Some(WalkItem::MissingRecord { cid, .. }))
                         | Ok(Some(WalkItem::MissingSubtree { cid })) => {
-                            return (state, Err(DriveError::MissingBlock(cid)));
+                            return (state, Err(DriveError::MissingBlock(Box::new(cid))));
                         }
                         Ok(None) => break,
                     }
@@ -300,17 +303,17 @@ impl DiskDriver {
         let out = res?;
 
         if out.is_empty() {
-            Ok(Step::End(None))
+            Ok(None)
         } else {
-            Ok(Step::Value(out))
+            Ok(Some(out))
         }
     }
 
     fn read_tx_blocking(
         &mut self,
         n: usize,
-        tx: mpsc::Sender<Result<Step<Vec<Output>>, DriveError>>,
-    ) -> Result<(), mpsc::error::SendError<Result<Step<Vec<Output>>, DriveError>>> {
+        tx: mpsc::Sender<Result<Vec<Output>, DriveError>>,
+    ) -> Result<(), mpsc::error::SendError<Result<Vec<Output>, DriveError>>> {
         let BigState { store, walker } = self.state.as_mut().expect("valid state");
 
         loop {
@@ -322,7 +325,7 @@ impl DiskDriver {
                     Ok(Some(WalkItem::Record(output))) => out.push(output),
                     Ok(Some(WalkItem::MissingRecord { cid, .. }))
                     | Ok(Some(WalkItem::MissingSubtree { cid })) => {
-                        return tx.blocking_send(Err(DriveError::MissingBlock(cid)));
+                        return tx.blocking_send(Err(DriveError::MissingBlock(Box::new(cid))));
                     }
                     Ok(None) => break,
                 }
@@ -331,27 +334,27 @@ impl DiskDriver {
             if out.is_empty() {
                 break;
             }
-            tx.blocking_send(Ok(Step::Value(out)))?;
+            tx.blocking_send(Ok(out))?;
         }
 
         Ok(())
     }
 
-    /// Spawn the disk reading task into a tokio blocking thread
+    /// Spawn the disk reading task into a tokio blocking thread.
+    ///
+    /// The channel sends `Ok(chunk)` for each batch of records. When the walk
+    /// is complete the sender is dropped and `rx.recv()` returns `None`.
     ///
     /// ```no_run
-    /// # use repo_stream::{disk::{DiskDriver, DriveError, _get_fake_disk_driver}, Step};
+    /// # use repo_stream::disk::{DiskDriver, DriveError, _get_fake_disk_driver};
     /// # #[tokio::main]
     /// # async fn main() -> Result<(), DriveError> {
     /// # let mut disk_driver = _get_fake_disk_driver();
     /// let (mut rx, join) = disk_driver.to_channel(512);
-    /// while let Some(recvd) = rx.recv().await {
-    ///     let outputs = recvd?;
-    ///     let Step::Value(outputs) = outputs else { break; };
-    ///     for output in outputs {
+    /// while let Some(chunk) = rx.recv().await {
+    ///     for output in chunk? {
     ///         println!("{}: size={}", output.key, output.data.len());
     ///     }
-    ///
     /// }
     /// # Ok(())
     /// # }
@@ -360,10 +363,10 @@ impl DiskDriver {
         mut self,
         n: usize,
     ) -> (
-        mpsc::Receiver<Result<Step<Vec<Output>>, DriveError>>,
+        mpsc::Receiver<Result<Vec<Output>, DriveError>>,
         tokio::task::JoinHandle<Self>,
     ) {
-        let (tx, rx) = mpsc::channel::<Result<Step<Vec<Output>>, DriveError>>(1);
+        let (tx, rx) = mpsc::channel::<Result<Vec<Output>, DriveError>>(1);
 
         let chan_task = tokio::task::spawn_blocking(move || {
             if let Err(mpsc::error::SendError(_)) = self.read_tx_blocking(n, tx) {
