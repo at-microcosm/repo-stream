@@ -82,7 +82,7 @@ pub mod walk;
 pub use disk::{DiskBuilder, DiskDriver, DiskError, DiskStore, DriveError};
 pub use mem::{DriverBuilder, LoadError, MemCar, PartialCar};
 pub use mst::Commit;
-pub use walk::{Output, WalkError, WalkItem, noop};
+pub use walk::{MstError, Output, WalkError, WalkItem, noop};
 
 pub type Bytes = Vec<u8>;
 

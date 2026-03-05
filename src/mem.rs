@@ -109,9 +109,10 @@ async fn load_car<R: AsyncRead + Unpin>(
     let mut car = CarReader::new(reader).await?;
 
     let roots = car.header().roots();
-    assert_eq!(roots.len(), 1);
-
     let root = *roots.first().ok_or(LoadError::MissingRoot)?;
+    if roots.len() > 1 {
+        log::debug!("CAR has {} roots; ignoring all but the first", roots.len());
+    }
     log::debug!("root: {root:?}");
 
     let mut commit = None;
@@ -172,7 +173,7 @@ pub struct MemCar {
     /// `None` if this slice (or full CAR) starts from the leftmost record in the tree.
     /// Not set automatically — callers may derive it from leading `MissingRecord` items.
     pub prev_key: Option<RepoPath>,
-    pub blocks: HashMap<ObjectLink, MaybeProcessedBlock>,
+    pub(crate) blocks: HashMap<ObjectLink, MaybeProcessedBlock>,
     walker: Walker,
     process: fn(Bytes) -> Bytes,
 }
