@@ -77,11 +77,13 @@ Find more [examples in the repo](https://tangled.org/@microcosm.blue/repo-stream
 pub mod disk;
 pub mod mem;
 pub mod mst;
+pub mod slice;
 pub mod walk;
 
 pub use disk::{DiskBuilder, DiskDriver, DiskError, DiskStore, DriveError};
 pub use mem::{DriverBuilder, LoadError, MemCar, PartialCar};
 pub use mst::Commit;
+pub use slice::{SliceError, SliceProof, SliceWalker};
 pub use walk::{MstError, Output, WalkError, WalkItem, noop};
 
 pub type Bytes = Vec<u8>;
