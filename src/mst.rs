@@ -137,7 +137,7 @@ impl<'de> Deserialize<'de> for MstNode {
                             let mut prefix: Vec<u8> = vec![];
 
                             for entry in map.next_value::<Vec<Entry>>()? {
-                                let mut rkey: Vec<u8> = vec![];
+                                let mut key_bytes: Vec<u8> = vec![];
                                 let pre_checked =
                                     prefix.get(..entry.prefix_len).ok_or_else(|| {
                                         de::Error::invalid_value(
@@ -146,29 +146,29 @@ impl<'de> Deserialize<'de> for MstNode {
                                         )
                                     })?;
 
-                                rkey.extend_from_slice(pre_checked);
-                                rkey.extend_from_slice(&entry.keysuffix);
+                                key_bytes.extend_from_slice(pre_checked);
+                                key_bytes.extend_from_slice(&entry.keysuffix);
 
-                                let rkey_s = String::from_utf8(rkey.clone()).map_err(|_| {
+                                let key = String::from_utf8(key_bytes.clone()).map_err(|_| {
                                     de::Error::invalid_value(
-                                        Unexpected::Bytes(&rkey),
-                                        &"a valid utf-8 rkey",
+                                        Unexpected::Bytes(&key_bytes),
+                                        &"a valid utf-8 key",
                                     )
                                 })?;
 
-                                let key_layer = atproto_mst_layer(&rkey_s);
+                                let key_layer = atproto_mst_layer(&key);
                                 if layer.is_none() {
                                     layer = Some(key_layer);
                                 } else if Some(key_layer) != layer {
                                     return Err(de::Error::invalid_value(
                                         Unexpected::Bytes(&prefix),
-                                        &"all rkeys to have equal MST layer",
+                                        &"all keys to have equal MST layer",
                                     ));
                                 }
 
                                 things.push(NodeThing {
                                     link: entry.value.into(),
-                                    kind: ThingKind::Record(rkey_s),
+                                    kind: ThingKind::Record(key),
                                 });
 
                                 if let Some(link) = entry.tree {
@@ -178,7 +178,7 @@ impl<'de> Deserialize<'de> for MstNode {
                                     });
                                 }
 
-                                prefix = rkey;
+                                prefix = key_bytes;
                             }
                         }
                         f => return Err(de::Error::unknown_field(f, NODE_FIELDS)),

@@ -64,7 +64,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 more recent todo
 - [ ] add a zero-copy rkyv process function example
 - [ ] car slices
-- [ ] lazy-value stream (for rkey -> CID diffing; tap-like `#sync` handling; save a fjall record `.get` when not needed)
+- [ ] lazy-value stream (for key -> CID diffing; tap-like `#sync` handling; save a fjall record `.get` when not needed)
 - [x] get an *emtpy* car for the test suite
 - [x] implement a max size on disk limit
 

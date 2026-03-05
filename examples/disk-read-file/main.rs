@@ -64,7 +64,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     log::info!("walking...");
 
     // this example uses the disk driver's channel mode: the tree walking is
-    // spawned onto a blocking thread, and we get chunks of rkey+blocks back
+    // spawned onto a blocking thread, and we get chunks of key + record pairs back
     let (mut rx, join) = driver.to_channel(512);
     while let Some(outputs) = rx.recv().await {
         let outputs = outputs?;
