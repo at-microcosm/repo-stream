@@ -136,7 +136,14 @@ impl<'de> Deserialize<'de> for MstNode {
 
                             let mut prefix: Vec<u8> = vec![];
 
-                            for entry in map.next_value::<Vec<Entry>>()? {
+                            let entries = map.next_value::<Vec<Entry>>()?;
+                            if entries.len() > MAX_MST_NODE_ENTRIES {
+                                return Err(de::Error::invalid_length(
+                                    entries.len(),
+                                    &"at most 200 entries per MST node",
+                                ));
+                            }
+                            for entry in entries {
                                 let mut key_bytes: Vec<u8> = vec![];
                                 let pre_checked =
                                     prefix.get(..entry.prefix_len).ok_or_else(|| {
@@ -204,6 +211,10 @@ impl<'de> Deserialize<'de> for MstNode {
         deserializer.deserialize_struct("MstNode", NODE_FIELDS, NodeVisitor)
     }
 }
+
+/// Maximum number of record entries (keys/record links, not counting child-node
+/// pointers) allowed in a single MST node.
+pub const MAX_MST_NODE_ENTRIES: usize = 200;
 
 impl MstNode {
     pub(crate) fn is_empty(&self) -> bool {
