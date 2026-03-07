@@ -338,6 +338,65 @@ impl MemCar {
 // ---------------------------------------------------------------------------
 
 impl<R: AsyncRead + Unpin> PartialCar<R> {
+    /// Attempt to finish loading into memory with a raised limit.
+    ///
+    /// Resumes reading from where `load_car` stopped and applies `new_limit_mb`
+    /// as the new ceiling. Returns a ready [`MemCar`] if all remaining blocks fit.
+    ///
+    /// If the new limit is also exceeded, returns
+    /// `Err(LoadError::MemoryLimitReached(partial))` with the updated partial
+    /// state, so the caller can raise the limit again or fall back to disk via
+    /// [`finish_loading`].
+    pub async fn continue_loading(mut self, new_limit_mb: usize) -> Result<MemCar, LoadError<R>> {
+        let new_max_size = new_limit_mb * 2_usize.pow(20);
+
+        // Count bytes already in the block map so we measure against the new limit.
+        let mut mem_size: usize = self.blocks.values().map(|b| b.len()).sum();
+
+        while let Some((cid, data)) = self.car.next_block().await? {
+            if cid == self.root {
+                let c: Commit = serde_ipld_dagcbor::from_slice(&data)?;
+                self.commit = Some(c);
+                continue;
+            }
+            let maybe_processed = MaybeProcessedBlock::maybe(self.process, data);
+            mem_size += maybe_processed.len();
+            self.blocks.insert(cid.into(), maybe_processed);
+            if mem_size >= new_max_size {
+                return Err(LoadError::MemoryLimitReached(Box::new(PartialCar {
+                    car: self.car,
+                    root: self.root,
+                    process: self.process,
+                    max_size: new_max_size,
+                    blocks: self.blocks,
+                    commit: self.commit,
+                })));
+            }
+        }
+
+        let commit = self.commit.ok_or(LoadError::MissingCommit)?;
+
+        let (root_node, root_bytes) = match self
+            .blocks
+            .get(&commit.data)
+            .ok_or(LoadError::MissingCommit)?
+        {
+            MaybeProcessedBlock::Processed(_) => Err(WalkError::BadCommitFingerprint)?,
+            MaybeProcessedBlock::Raw(bytes) => {
+                (serde_ipld_dagcbor::from_slice(bytes)?, bytes.clone())
+            }
+        };
+        let root_cid: Cid = commit.data.clone().into();
+
+        Ok(MemCar {
+            commit,
+            prev_key: None,
+            blocks: self.blocks,
+            walker: Walker::new(root_node, root_cid, root_bytes),
+            process: self.process,
+        })
+    }
+
     pub async fn finish_loading(
         mut self,
         mut store: DiskStore,
