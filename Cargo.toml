@@ -8,6 +8,7 @@ repository = "https://tangled.org/@microcosm.blue/repo-stream"
 
 [dependencies]
 fjall = { version = "3.0.1", default-features = false }
+jacquard-repo = { path = "../jacquard/crates/jacquard-repo", optional = true }
 hashbrown = { version = "0.16.1", optional = true }
 cid = { version = "0.11.1", features = ["serde"] }
 iroh-car = "0.5.1"
@@ -22,6 +23,7 @@ tokio = { version = "1.47.1", features = ["rt", "sync"] }
 [features]
 default = []
 hashbrown = ["dep:hashbrown"]
+jacquard = ["dep:jacquard-repo"]
 
 [dev-dependencies]
 clap = { version = "4.5.48", features = ["derive"] }

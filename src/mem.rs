@@ -422,3 +422,78 @@ impl<R: AsyncRead + Unpin> PartialCar<R> {
         Ok((commit, None, make_disk_driver(store, walker, self.process)))
     }
 }
+
+// ---------------------------------------------------------------------------
+// jacquard feature: construct a MemCar from a pre-parsed ParsedCar
+// ---------------------------------------------------------------------------
+
+/// Errors from [`DriverBuilder::load_jacquard_parsed_car`]
+#[cfg(feature = "jacquard")]
+#[derive(Debug, thiserror::Error)]
+pub enum JacquardLoadError {
+    #[error("failed to decode cbor: {0}")]
+    BadBlock(#[from] serde_ipld_dagcbor::DecodeError<std::convert::Infallible>),
+    #[error("missing commit")]
+    MissingCommit,
+    #[error("failed to walk mst: {0}")]
+    WalkError(#[from] WalkError),
+}
+
+#[cfg(feature = "jacquard")]
+impl DriverBuilder {
+    /// Construct a [`MemCar`] from a pre-parsed [`jacquard_repo::car::reader::ParsedCar`].
+    ///
+    /// Synchronous alternative to [`load_car`] for callers that already hold a
+    /// `ParsedCar` from the jacquard ecosystem. The block processor from
+    /// [`with_block_processor`] is applied; the memory limit is ignored since all
+    /// blocks are already in memory.
+    pub fn load_jacquard_parsed_car(
+        &self,
+        parsed: jacquard_repo::car::reader::ParsedCar,
+    ) -> Result<MemCar, JacquardLoadError> {
+        use crate::mst::ObjectLink;
+
+        let process = self.block_processor;
+        let root = parsed.root;
+
+        // Decode the commit block at the root CID.
+        let commit_bytes = parsed
+            .blocks
+            .get(&root)
+            .ok_or(JacquardLoadError::MissingCommit)?
+            .as_ref();
+        let commit: Commit = serde_ipld_dagcbor::from_slice(commit_bytes)?;
+
+        // Build the block map from all non-commit blocks.
+        let mut blocks = HashMap::new();
+        for (cid, data) in parsed.blocks {
+            if cid == root {
+                continue;
+            }
+            let maybe_processed = MaybeProcessedBlock::maybe(process, data.to_vec());
+            blocks.insert(ObjectLink::from(cid), maybe_processed);
+        }
+
+        // Look up and decode the root MST node.
+        let root_cid: Cid = commit.data.clone().into();
+        let (root_node, root_bytes) = match blocks
+            .get(&commit.data)
+            .ok_or(JacquardLoadError::MissingCommit)?
+        {
+            MaybeProcessedBlock::Processed(_) => {
+                return Err(WalkError::BadCommitFingerprint.into());
+            }
+            MaybeProcessedBlock::Raw(bytes) => {
+                (serde_ipld_dagcbor::from_slice(bytes)?, bytes.clone())
+            }
+        };
+
+        Ok(MemCar {
+            commit,
+            prev_key: None,
+            blocks,
+            walker: Walker::new(root_node, root_cid, root_bytes),
+            process,
+        })
+    }
+}
