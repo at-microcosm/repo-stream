@@ -37,6 +37,7 @@ impl MaybeProcessedBlock {
         }
     }
 
+    #[allow(clippy::len_without_is_empty)]
     pub fn len(&self) -> usize {
         match self {
             MaybeProcessedBlock::Raw(b) | MaybeProcessedBlock::Processed(b) => b.len(),
@@ -307,10 +308,28 @@ impl Walker {
     /// Returns the key and CID of each record directly from the MST node entries.
     /// MST node blocks are still fetched to traverse the tree structure.
     ///
-    /// Returns `Err(WalkError::MissingNode)` if a child MST node block is absent.
+    /// If a child MST node block is absent, the subtree is silently skipped.
+    /// Use [`step_keys_strict`] to error instead.
     pub fn step_keys(
         &mut self,
         blocks: &HashMap<ObjectLink, MaybeProcessedBlock>,
+    ) -> Result<Option<(RepoPath, Cid)>, WalkError> {
+        self.step_keys_impl(blocks, false)
+    }
+
+    /// Like [`step_keys`], but returns `Err(WalkError::MissingNode)` if a child
+    /// MST node block is absent rather than silently skipping the subtree.
+    pub fn step_keys_strict(
+        &mut self,
+        blocks: &HashMap<ObjectLink, MaybeProcessedBlock>,
+    ) -> Result<Option<(RepoPath, Cid)>, WalkError> {
+        self.step_keys_impl(blocks, true)
+    }
+
+    fn step_keys_impl(
+        &mut self,
+        blocks: &HashMap<ObjectLink, MaybeProcessedBlock>,
+        strict: bool,
     ) -> Result<Option<(RepoPath, Cid)>, WalkError> {
         while let Some(NodeThing { link, kind }) = self.next_todo() {
             match kind {
@@ -326,9 +345,13 @@ impl Walker {
                 }
                 ThingKind::ChildNode => {
                     let Some(mpb) = blocks.get(&link) else {
-                        return Err(WalkError::MissingNode {
-                            cid: Box::new(link.into()),
-                        });
+                        if strict {
+                            return Err(WalkError::MissingNode {
+                                cid: Box::new(link.into()),
+                            });
+                        } else {
+                            continue;
+                        }
                     };
                     let MaybeProcessedBlock::Raw(data) = mpb else {
                         return Err(WalkError::BadCommitFingerprint);

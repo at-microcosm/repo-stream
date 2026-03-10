@@ -285,8 +285,10 @@ impl MemCar {
     /// Record CIDs come directly from MST node entries — record blocks are never
     /// looked up. MST node blocks are still fetched to traverse the tree.
     ///
-    /// Returns `Ok(None)` when the walk is complete. Returns
-    /// `Err(WalkError::MissingNode)` if a child MST node block is absent.
+    /// **Not strict**: if a child MST node block is absent, the subtree is silently
+    /// skipped. Use [`next_keys_strict`] to error instead.
+    ///
+    /// Returns `Ok(None)` when the walk is complete.
     pub fn next_keys(&mut self) -> Result<Option<(RepoPath, Cid)>, WalkError> {
         self.walker.step_keys(&self.blocks)
     }
@@ -295,12 +297,48 @@ impl MemCar {
     ///
     /// Like [`next_keys`] but collects up to `n` pairs in one call.
     ///
-    /// Returns `Ok(None)` when the walk is complete. Returns
-    /// `Err(WalkError::MissingNode)` if a child MST node block is absent.
+    /// **Not strict**: if a child MST node block is absent, the subtree is silently
+    /// skipped. Use [`next_chunk_keys_strict`] to error instead.
+    ///
+    /// Returns `Ok(None)` when the walk is complete.
     pub fn next_chunk_keys(&mut self, n: usize) -> Result<Option<Vec<(RepoPath, Cid)>>, WalkError> {
         let mut out = Vec::with_capacity(n);
         for _ in 0..n {
             match self.walker.step_keys(&self.blocks)? {
+                Some(pair) => out.push(pair),
+                None => break,
+            }
+        }
+        if out.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(out))
+        }
+    }
+
+    /// Get the next key and CID from the walk, without fetching record blocks.
+    ///
+    /// Like [`next_keys`] but returns `Err(WalkError::MissingNode)` if a child
+    /// MST node block is absent rather than silently skipping the subtree.
+    ///
+    /// Returns `Ok(None)` when the walk is complete.
+    pub fn next_keys_strict(&mut self) -> Result<Option<(RepoPath, Cid)>, WalkError> {
+        self.walker.step_keys_strict(&self.blocks)
+    }
+
+    /// Collect up to `n` key+CID pairs, without fetching record blocks.
+    ///
+    /// Like [`next_chunk_keys`] but returns `Err(WalkError::MissingNode)` if a
+    /// child MST node block is absent rather than silently skipping the subtree.
+    ///
+    /// Returns `Ok(None)` when the walk is complete.
+    pub fn next_chunk_keys_strict(
+        &mut self,
+        n: usize,
+    ) -> Result<Option<Vec<(RepoPath, Cid)>>, WalkError> {
+        let mut out = Vec::with_capacity(n);
+        for _ in 0..n {
+            match self.walker.step_keys_strict(&self.blocks)? {
                 Some(pair) => out.push(pair),
                 None => break,
             }

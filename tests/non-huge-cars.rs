@@ -96,7 +96,7 @@ async fn test_next_chunk_keys_counts() {
     assert_eq!(count_keys(MIDSIZE_CAR).await, 11585);
 }
 
-/// Verify that next_chunk_keys returns the same (key, cid) pairs as next_chunk_strict.
+/// Verify that next_chunk_keys_strict returns the same (key, cid) pairs as next_chunk_strict.
 #[tokio::test]
 async fn test_next_chunk_keys_agrees_with_strict() {
     let mut mc_strict = DriverBuilder::new()
@@ -118,7 +118,7 @@ async fn test_next_chunk_keys_agrees_with_strict() {
     }
 
     let mut from_keys = Vec::new();
-    while let Some(pairs) = mc_keys.next_chunk_keys(256).unwrap() {
+    while let Some(pairs) = mc_keys.next_chunk_keys_strict(256).unwrap() {
         from_keys.extend(pairs);
     }
 
