@@ -9,12 +9,15 @@ use serde::de::{self, Deserializer, MapAccess, Unexpected, Visitor};
 use sha2::{Digest, Sha256};
 use std::fmt;
 
-#[derive(Debug, serde::Deserialize, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, serde::Deserialize, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ObjectLink(Cid);
 
 impl ObjectLink {
     pub fn to_bytes(&self) -> Vec<u8> {
         self.0.to_bytes()
+    }
+    pub fn as_cid(&self) -> Cid {
+        self.0
     }
 }
 
