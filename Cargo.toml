@@ -28,7 +28,7 @@ jacquard = ["dep:jacquard-repo"]
 [dev-dependencies]
 async-channel = "2.5.0"
 clap = { version = "4.5.48", features = ["derive"] }
-criterion = { version = "0.7.0", features = ["async_tokio"] }
+criterion = { version = "0.8.1", features = ["async_tokio"] }
 env_logger = "0.11.8"
 hmac-sha256 = "1.1.12"
 mimalloc = "0.1.48"
