@@ -112,6 +112,15 @@ pub enum WalkItem {
     MissingSubtree { cid: Cid },
 }
 
+impl WalkItem {
+    pub fn key(&self) -> Option<&RepoPath> {
+        match self {
+            Self::Record(Output { key, .. }) | Self::MissingRecord { key, .. } => Some(key),
+            _ => None,
+        }
+    }
+}
+
 /// A single record emitted by the walker.
 #[derive(Debug, PartialEq)]
 pub struct Output<T = Bytes> {
