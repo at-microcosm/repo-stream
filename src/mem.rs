@@ -181,6 +181,13 @@ pub struct MemCar {
 }
 
 impl MemCar {
+    /// The total mst height
+    ///
+    /// Defined by to the root node's layer, computed from its entry keys
+    pub fn height(&self) -> u32 {
+        self.walker.height()
+    }
+
     /// Seek forward to the first record at or after `target`.
     ///
     /// Uses the MST structure to skip entire subtrees efficiently.

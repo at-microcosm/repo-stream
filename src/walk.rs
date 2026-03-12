@@ -151,10 +151,7 @@ impl Walker {
         }
     }
 
-    /// The total mst height
-    ///
-    /// Defined by to the root node's layer, computed from its entry keys
-    pub fn height(&self) -> u32 {
+    pub(crate) fn height(&self) -> u32 {
         self.root_layer
     }
 
