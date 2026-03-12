@@ -151,6 +151,13 @@ impl Walker {
         }
     }
 
+    /// The total mst height
+    ///
+    /// Defined by to the root node's layer, computed from its entry keys
+    pub fn height(&self) -> u32 {
+        self.root_layer
+    }
+
     pub(crate) fn mpb_step(
         &mut self,
         thing: NodeThing,
