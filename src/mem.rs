@@ -156,7 +156,7 @@ async fn load_car<R: AsyncRead + Unpin>(
         MaybeProcessedBlock::Processed(_) => Err(WalkError::BadCommitFingerprint)?,
         MaybeProcessedBlock::Raw(bytes) => (serde_ipld_dagcbor::from_slice(bytes)?, bytes.clone()),
     };
-    let root_cid: Cid = commit.data.clone().into();
+    let root_cid: Cid = commit.data.into();
 
     Ok(MemCar {
         commit,
@@ -194,8 +194,7 @@ impl MemCar {
     /// Returns all `WalkItem` variants as-is, including `MissingRecord` and
     /// `MissingSubtree` for sparse trees and CAR slices. Returns `Ok(None)`
     /// when the walk is complete.
-    ///
-    /// TODO: make this an implementation of Iterator
+    #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> Result<Option<WalkItem>, WalkError> {
         self.walker.step(&self.blocks, self.process)
     }
@@ -424,7 +423,7 @@ impl<R: AsyncRead + Unpin> PartialCar<R> {
                 (serde_ipld_dagcbor::from_slice(bytes)?, bytes.clone())
             }
         };
-        let root_cid: Cid = commit.data.clone().into();
+        let root_cid: Cid = commit.data.into();
 
         Ok(MemCar {
             commit,
@@ -509,7 +508,7 @@ impl<R: AsyncRead + Unpin> PartialCar<R> {
             .map_err(|e| DriveError::StorageError(DiskError::DbError(e)))?
             .ok_or(DriveError::MissingCommit)?;
 
-        let root_cid: Cid = commit.data.clone().into();
+        let root_cid: Cid = commit.data.into();
         let (node, root_bytes) = match MaybeProcessedBlock::from_bytes(db_bytes.to_vec()) {
             MaybeProcessedBlock::Processed(_) => Err(WalkError::BadCommitFingerprint)?,
             MaybeProcessedBlock::Raw(bytes) => (serde_ipld_dagcbor::from_slice(&bytes)?, bytes),

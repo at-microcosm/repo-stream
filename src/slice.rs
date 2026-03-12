@@ -138,6 +138,7 @@ impl<'a> SliceWalker<'a> {
     ///
     /// Errors on any missing block within the range, on an MST node absent
     /// within the range, or on a proof violation.
+    #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> Result<Option<Output>, SliceError> {
         if self.done {
             return Ok(None);
