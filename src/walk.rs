@@ -112,15 +112,6 @@ pub enum WalkItem {
     MissingSubtree { cid: Cid },
 }
 
-impl WalkItem {
-    pub fn is_missing(&self) -> bool {
-        matches!(
-            self,
-            Self::MissingRecord { .. } | Self::MissingSubtree { .. }
-        )
-    }
-}
-
 /// A single record emitted by the walker.
 #[derive(Debug, PartialEq)]
 pub struct Output<T = Bytes> {
