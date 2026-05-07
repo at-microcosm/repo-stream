@@ -15,7 +15,7 @@ let store = DiskBuilder::new()
 */
 
 use crate::{
-    Bytes,
+    Bytes, RepoPath,
     mst::ThingKind,
     walk::{MaybeProcessedBlock, MstError, Output, WalkError, WalkItem, Walker},
 };
@@ -273,6 +273,22 @@ impl DiskDriver {
     /// # Ok(())
     /// # }
     /// ```
+    /// Walk the MST returning the next `(key, record_bytes)` pair.
+    ///
+    /// **Blocking.** Calls fjall's sync read path directly — if you're inside a
+    /// tokio runtime, wrap this in `spawn_blocking` yourself.
+    pub fn next_blocking(&mut self) -> Result<Option<(RepoPath, Bytes)>, DriveError> {
+        let BigState { store, walker } = self.state.as_mut().expect("valid state");
+        match walker.disk_step(store, self.process)? {
+            Some(WalkItem::Record(Output { key, data, .. })) => Ok(Some((key, data))),
+            Some(WalkItem::MissingRecord { cid, .. }) | Some(WalkItem::MissingSubtree { cid }) => {
+                Err(DriveError::MissingBlock(Box::new(cid)))
+            }
+            Some(WalkItem::Node { .. }) => unreachable!("disk_step never emits Node items"),
+            None => Ok(None),
+        }
+    }
+
     pub async fn next_chunk(&mut self, n: usize) -> Result<Option<Vec<Output>>, DriveError> {
         let process = self.process;
 
