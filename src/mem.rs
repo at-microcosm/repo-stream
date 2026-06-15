@@ -6,8 +6,9 @@ use crate::{
     mst::{Commit, ObjectLink},
     walk::{MaybeProcessedBlock, Output, WalkError, WalkItem, Walker},
 };
-use cid::Cid;
+use cid::{Cid, multihash::Multihash};
 use iroh_car::CarReader;
+use sha2::{Digest, Sha256};
 use std::convert::Infallible;
 use thiserror::Error;
 use tokio::io::AsyncRead;
@@ -33,6 +34,33 @@ pub enum LoadError<R: AsyncRead + Unpin> {
     /// boxed because it's big, to avoid making normal load errors heavy
     #[error("partially loaded car")]
     MemoryLimitReached(Box<PartialCar<R>>),
+}
+
+/// Errors from [`DriverBuilder::load_commit`].
+#[derive(Debug, Error)]
+pub enum LoadCommitError {
+    #[error("failed reading CAR: {0}")]
+    CarReader(#[from] iroh_car::Error),
+    #[error("failed to decode cbor: {0}")]
+    BadBlock(#[from] serde_ipld_dagcbor::DecodeError<Infallible>),
+    /// The CAR header listed no root CID.
+    #[error("missing mst root node")]
+    MissingRoot,
+    /// Reached the end of the CAR without a block at the root CID.
+    #[error("missing commit")]
+    MissingCommit,
+    /// The commit block's bytes do not hash to the root CID.
+    #[error("commit cid mismatch: claimed {expected}, computed {computed}")]
+    CidMismatch {
+        expected: Box<Cid>,
+        computed: Box<Cid>,
+    },
+    /// Read past the memory limit before the commit block was found.
+    ///
+    /// Acts as a bandwidth guard: a well-formed CAR places the commit early, so
+    /// streaming a large amount before it is suspect.
+    #[error("reached the {limit}-byte limit after reading {read} bytes before finding the commit")]
+    MemoryLimitReached { read: usize, limit: usize },
 }
 
 /// A partially memory-loaded CAR file that hit the memory limit mid-stream.
@@ -94,6 +122,27 @@ impl DriverBuilder {
     /// the partial state, which can be resumed with disk storage.
     pub async fn load_car<R: AsyncRead + Unpin>(&self, reader: R) -> Result<MemCar, LoadError<R>> {
         load_car(reader, self.block_processor, self.mem_limit_mb).await
+    }
+
+    /// Read a CAR and return just its [`Commit`], without buffering record
+    /// blocks or building a walker.
+    ///
+    /// The commit always lives at the CAR's root CID, so this reads block by
+    /// block until that CID appears, verifies the block's bytes hash to it,
+    /// decodes it, and returns — ignoring every other block. This is the cheap
+    /// path for atproto `#sync` slices, where the commit is the only block.
+    ///
+    /// The builder's memory limit still applies as a bandwidth guard: if more
+    /// than `mem_limit_mb` of blocks are read *before* the commit is found, this
+    /// returns [`LoadCommitError::MemoryLimitReached`]. Once the commit is found
+    /// it returns immediately, leaving the rest of the reader unconsumed.
+    ///
+    /// The block processor is not used.
+    pub async fn load_commit<R: AsyncRead + Unpin>(
+        &self,
+        reader: R,
+    ) -> Result<Commit, LoadCommitError> {
+        load_commit(reader, self.mem_limit_mb).await
     }
 }
 
@@ -165,6 +214,63 @@ async fn load_car<R: AsyncRead + Unpin>(
         walker: Walker::new(root_node, root_cid, root_bytes),
         process,
     })
+}
+
+async fn load_commit<R: AsyncRead + Unpin>(
+    reader: R,
+    mem_limit_mb: usize,
+) -> Result<Commit, LoadCommitError> {
+    let max_size = mem_limit_mb * 2_usize.pow(20);
+
+    let mut car = CarReader::new(reader).await?;
+
+    let roots = car.header().roots();
+    let root = *roots.first().ok_or(LoadCommitError::MissingRoot)?;
+    if roots.len() > 1 {
+        log::debug!("CAR has {} roots; ignoring all but the first", roots.len());
+    }
+
+    let mut read_bytes = 0;
+    while let Some((cid, data)) = car.next_block().await? {
+        // The commit is always the block at the root CID; ignore everything else.
+        if cid == root {
+            verify_block_cid(&root, &data)?;
+            return Ok(serde_ipld_dagcbor::from_slice(&data)?);
+        }
+        // Guard against a CAR streaming unbounded bytes ahead of the commit.
+        read_bytes += data.len();
+        if read_bytes >= max_size {
+            return Err(LoadCommitError::MemoryLimitReached {
+                read: read_bytes,
+                limit: max_size,
+            });
+        }
+    }
+
+    Err(LoadCommitError::MissingCommit)
+}
+
+/// Verify that `data` hashes to `cid` under atproto's only permitted CID form.
+///
+/// atproto blocks are always CIDv1 / dag-cbor / sha-256 — the byte prefix
+/// `0x01711220`. Recomputes that CID from the bytes and compares.
+fn verify_block_cid(cid: &Cid, data: &[u8]) -> Result<(), LoadCommitError> {
+    const DAG_CBOR: u64 = 0x71;
+    const SHA2_256: u64 = 0x12;
+
+    let digest = Sha256::digest(data);
+    // wrap only fails if the digest exceeds the multihash's 64-byte allocation;
+    // a sha-256 digest is 32 bytes, so this is infallible here.
+    let mh = Multihash::<64>::wrap(SHA2_256, &digest)
+        .expect("sha-256 digest is 32 bytes, within the 64-byte multihash limit");
+    let computed = Cid::new_v1(DAG_CBOR, mh);
+    if &computed != cid {
+        return Err(LoadCommitError::CidMismatch {
+            expected: Box::new(*cid),
+            computed: Box::new(computed),
+        });
+    }
+    Ok(())
 }
 
 /// A fully loaded in-memory CAR file, ready for MST walking.
