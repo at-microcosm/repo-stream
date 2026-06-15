@@ -107,7 +107,7 @@ pub struct CidMismatch {
 /// (`0x12`) — the byte prefix `0x01711220`. Recomputes that CID from the bytes
 /// and compares. Repos routinely come from untrusted sources, so this is applied
 /// on every block read out of a CAR and cannot be disabled.
-pub(crate) fn verify_block_cid(claimed: &Cid, bytes: &[u8]) -> Result<(), Box<CidMismatch>> {
+pub fn verify_block_cid(claimed: &Cid, bytes: &[u8]) -> Result<(), Box<CidMismatch>> {
     use cid::multihash::Multihash;
     const DAG_CBOR: u64 = 0x71;
     const SHA2_256: u64 = 0x12;
