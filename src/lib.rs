@@ -83,8 +83,8 @@ pub mod walk;
 pub use disk::{DiskBuilder, DiskDriver, DiskError, DiskStore, DriveError};
 #[cfg(feature = "jacquard")]
 pub use mem::JacquardLoadError;
-pub use mem::{DriverBuilder, LoadError, MemCar, PartialCar};
-pub use mst::Commit;
+pub use mem::{DriverBuilder, LoadCommitError, LoadError, MemCar, PartialCar, PartialCommit};
+pub use mst::{CidMismatch, Commit};
 pub use slice::{SliceError, SliceProof, SliceWalker};
 pub use walk::{MstError, Output, WalkError, WalkItem, noop};
 
