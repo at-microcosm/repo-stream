@@ -16,7 +16,7 @@ let store = DiskBuilder::new()
 
 use crate::{
     Bytes, RepoPath,
-    mst::ThingKind,
+    mst::{CidMismatch, ThingKind},
     walk::{MaybeProcessedBlock, MstError, Output, WalkError, WalkItem, Walker},
 };
 use fjall::{Database, Error as FjallError, Keyspace, KeyspaceCreateOptions};
@@ -59,6 +59,8 @@ pub enum DriveError {
     WalkError(#[from] WalkError),
     #[error("CAR file had no roots")]
     MissingRoot,
+    #[error("Block did not match its CID: {0}")]
+    BadCid(#[from] Box<CidMismatch>),
     #[error("Storage error: {0}")]
     StorageError(#[from] DiskError),
     #[error("Unexpected missing block: {0:?}")]

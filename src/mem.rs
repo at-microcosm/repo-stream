@@ -3,12 +3,11 @@
 use crate::{
     Bytes, HashMap, RepoPath,
     disk::{DiskDriver, DiskError, DiskStore, DriveError, make_disk_driver},
-    mst::{Commit, ObjectLink},
+    mst::{CidMismatch, Commit, ObjectLink, verify_block_cid},
     walk::{MaybeProcessedBlock, Output, WalkError, WalkItem, Walker},
 };
-use cid::{Cid, multihash::Multihash};
+use cid::Cid;
 use iroh_car::CarReader;
-use sha2::{Digest, Sha256};
 use std::convert::Infallible;
 use thiserror::Error;
 use tokio::io::AsyncRead;
@@ -26,6 +25,9 @@ pub enum LoadError<R: AsyncRead + Unpin> {
     MissingRoot,
     #[error("failed to walk mst: {0}")]
     WalkError(#[from] WalkError),
+    /// A block's bytes did not match the CID that referenced it.
+    #[error("bad block cid: {0}")]
+    BadCid(#[from] Box<CidMismatch>),
     /// The memory limit was reached before all blocks were loaded.
     ///
     /// The partial state is returned so the caller can decide what to do
@@ -37,8 +39,12 @@ pub enum LoadError<R: AsyncRead + Unpin> {
 }
 
 /// Errors from [`DriverBuilder::load_commit`].
+///
+/// Distinct from [`LoadError`]: reading only the commit never buffers blocks or
+/// builds a walker. Hitting the byte budget yields a [`PartialCommit`] that
+/// resumes *as a commit read* — never as a full repo load.
 #[derive(Debug, Error)]
-pub enum LoadCommitError {
+pub enum LoadCommitError<R: AsyncRead + Unpin> {
     #[error("failed reading CAR: {0}")]
     CarReader(#[from] iroh_car::Error),
     #[error("failed to decode cbor: {0}")]
@@ -46,21 +52,46 @@ pub enum LoadCommitError {
     /// The CAR header listed no root CID.
     #[error("missing mst root node")]
     MissingRoot,
-    /// Reached the end of the CAR without a block at the root CID.
+    /// The CAR ended without a block at the root CID.
     #[error("missing commit")]
     MissingCommit,
-    /// The commit block's bytes do not hash to the root CID.
-    #[error("commit cid mismatch: claimed {expected}, computed {computed}")]
-    CidMismatch {
-        expected: Box<Cid>,
-        computed: Box<Cid>,
-    },
-    /// Read past the memory limit before the commit block was found.
+    /// A block's bytes did not match the CID that referenced it.
+    #[error("bad block cid: {0}")]
+    BadCid(#[from] Box<CidMismatch>),
+    /// Streamed too many bytes of non-commit blocks before reaching the commit.
     ///
-    /// Acts as a bandwidth guard: a well-formed CAR places the commit early, so
-    /// streaming a large amount before it is suspect.
-    #[error("reached the {limit}-byte limit after reading {read} bytes before finding the commit")]
-    MemoryLimitReached { read: usize, limit: usize },
+    /// Guards bandwidth and time against CARs that bury (or omit) the commit
+    /// behind excessive junk blocks. The budget is the builder's `mem_limit_mb`.
+    /// The [`PartialCommit`] resumes the search with a raised budget.
+    ///
+    /// boxed because it's big, to avoid making normal load errors heavy
+    #[error("read {} bytes without reaching the commit (budget {})", .0.read, .0.budget)]
+    ReadBudgetExceeded(Box<PartialCommit<R>>),
+}
+
+/// A commit read that hit the byte budget before reaching the commit block.
+///
+/// Resume with [`continue_loading`](Self::continue_loading) and a higher limit
+/// to keep searching for the commit — the commit-only mirror of [`PartialCar`].
+#[derive(Debug)]
+pub struct PartialCommit<R: AsyncRead + Unpin> {
+    pub(crate) car: CarReader<R>,
+    pub(crate) root: Cid,
+    /// total bytes of non-commit blocks streamed so far
+    pub read: usize,
+    /// the byte budget that was exceeded
+    pub budget: usize,
+}
+
+impl<R: AsyncRead + Unpin> PartialCommit<R> {
+    /// Keep reading toward the commit with a raised budget.
+    ///
+    /// `new_limit_mb` is the new *total* ceiling on bytes streamed before the
+    /// commit; bytes already read count against it. Returns the commit if found
+    /// within the new budget, or a further-advanced [`PartialCommit`] if not.
+    pub async fn continue_loading(self, new_limit_mb: usize) -> Result<Commit, LoadCommitError<R>> {
+        drive_to_commit(self.car, self.root, self.read, new_limit_mb).await
+    }
 }
 
 /// A partially memory-loaded CAR file that hit the memory limit mid-stream.
@@ -124,24 +155,20 @@ impl DriverBuilder {
         load_car(reader, self.block_processor, self.mem_limit_mb).await
     }
 
-    /// Read a CAR and return just its [`Commit`], without buffering record
-    /// blocks or building a walker.
+    /// Load an atproto repository CAR but return just its [`Commit`].
     ///
-    /// The commit always lives at the CAR's root CID, so this reads block by
-    /// block until that CID appears, verifies the block's bytes hash to it,
-    /// decodes it, and returns — ignoring every other block. This is the cheap
-    /// path for atproto `#sync` slices, where the commit is the only block.
+    /// The commit is the CAR's root block — the first block of a well-formed CAR,
+    /// and the only block of an atproto `#sync` slice — so this returns as soon as
+    /// it is read and never touches the rest of the CAR. Non-commit blocks (only
+    /// seen if the commit isn't first) are skipped, not buffered.
     ///
-    /// The builder's memory limit still applies as a bandwidth guard: if more
-    /// than `mem_limit_mb` of blocks are read *before* the commit is found, this
-    /// returns [`LoadCommitError::MemoryLimitReached`]. Once the commit is found
-    /// it returns immediately, leaving the rest of the reader unconsumed.
-    ///
-    /// The block processor is not used.
+    /// Every block is CID-verified, like all load paths. The block processor is
+    /// not used. The builder's `mem_limit_mb` acts as a read budget — see
+    /// [`LoadCommitError::ReadBudgetExceeded`].
     pub async fn load_commit<R: AsyncRead + Unpin>(
         &self,
         reader: R,
-    ) -> Result<Commit, LoadCommitError> {
+    ) -> Result<Commit, LoadCommitError<R>> {
         load_commit(reader, self.mem_limit_mb).await
     }
 }
@@ -170,6 +197,7 @@ async fn load_car<R: AsyncRead + Unpin>(
     let mut mem_size = 0;
     while let Some((cid, data)) = car.next_block().await? {
         block_count += 1;
+        verify_block_cid(&cid, &data)?;
         // The root commit block is handled separately — never passed to the processor
         if cid == root {
             let c: Commit = serde_ipld_dagcbor::from_slice(&data)?;
@@ -216,13 +244,15 @@ async fn load_car<R: AsyncRead + Unpin>(
     })
 }
 
+/// Reads a CAR just far enough to return its commit (the root block).
+///
+/// Every block is CID-verified. Non-commit blocks are dropped after only their
+/// size is counted against the read budget — nothing is buffered.
 async fn load_commit<R: AsyncRead + Unpin>(
     reader: R,
     mem_limit_mb: usize,
-) -> Result<Commit, LoadCommitError> {
-    let max_size = mem_limit_mb * 2_usize.pow(20);
-
-    let mut car = CarReader::new(reader).await?;
+) -> Result<Commit, LoadCommitError<R>> {
+    let car = CarReader::new(reader).await?;
 
     let roots = car.header().roots();
     let root = *roots.first().ok_or(LoadCommitError::MissingRoot)?;
@@ -230,47 +260,44 @@ async fn load_commit<R: AsyncRead + Unpin>(
         log::debug!("CAR has {} roots; ignoring all but the first", roots.len());
     }
 
-    let mut read_bytes = 0;
+    drive_to_commit(car, root, 0, mem_limit_mb).await
+}
+
+/// Stream blocks until the commit (root block) is found, verifying every CID.
+///
+/// Non-commit blocks are dropped after their size is counted against the budget;
+/// hitting it yields a resumable [`PartialCommit`]. Shared by [`load_commit`] and
+/// [`PartialCommit::continue_loading`]. `read` is the byte count carried in from
+/// a prior attempt (0 for a fresh load).
+async fn drive_to_commit<R: AsyncRead + Unpin>(
+    mut car: CarReader<R>,
+    root: Cid,
+    mut read: usize,
+    limit_mb: usize,
+) -> Result<Commit, LoadCommitError<R>> {
+    let budget = limit_mb * 2_usize.pow(20);
+
     while let Some((cid, data)) = car.next_block().await? {
-        // The commit is always the block at the root CID; ignore everything else.
+        verify_block_cid(&cid, &data)?;
         if cid == root {
-            verify_block_cid(&root, &data)?;
+            // the commit is the root block; return it and skip the rest
             return Ok(serde_ipld_dagcbor::from_slice(&data)?);
         }
-        // Guard against a CAR streaming unbounded bytes ahead of the commit.
-        read_bytes += data.len();
-        if read_bytes >= max_size {
-            return Err(LoadCommitError::MemoryLimitReached {
-                read: read_bytes,
-                limit: max_size,
-            });
+        // non-commit block: charge its size to the budget, then drop it
+        read += data.len();
+        if read >= budget {
+            return Err(LoadCommitError::ReadBudgetExceeded(Box::new(
+                PartialCommit {
+                    car,
+                    root,
+                    read,
+                    budget,
+                },
+            )));
         }
     }
 
     Err(LoadCommitError::MissingCommit)
-}
-
-/// Verify that `data` hashes to `cid` under atproto's only permitted CID form.
-///
-/// atproto blocks are always CIDv1 / dag-cbor / sha-256 — the byte prefix
-/// `0x01711220`. Recomputes that CID from the bytes and compares.
-fn verify_block_cid(cid: &Cid, data: &[u8]) -> Result<(), LoadCommitError> {
-    const DAG_CBOR: u64 = 0x71;
-    const SHA2_256: u64 = 0x12;
-
-    let digest = Sha256::digest(data);
-    // wrap only fails if the digest exceeds the multihash's 64-byte allocation;
-    // a sha-256 digest is 32 bytes, so this is infallible here.
-    let mh = Multihash::<64>::wrap(SHA2_256, &digest)
-        .expect("sha-256 digest is 32 bytes, within the 64-byte multihash limit");
-    let computed = Cid::new_v1(DAG_CBOR, mh);
-    if &computed != cid {
-        return Err(LoadCommitError::CidMismatch {
-            expected: Box::new(*cid),
-            computed: Box::new(computed),
-        });
-    }
-    Ok(())
 }
 
 /// A fully loaded in-memory CAR file, ready for MST walking.
@@ -504,6 +531,7 @@ impl<R: AsyncRead + Unpin> PartialCar<R> {
         let mut mem_size: usize = self.blocks.values().map(|b| b.len()).sum();
 
         while let Some((cid, data)) = self.car.next_block().await? {
+            verify_block_cid(&cid, &data)?;
             if cid == self.root {
                 let c: Commit = serde_ipld_dagcbor::from_slice(&data)?;
                 self.commit = Some(c);
@@ -584,6 +612,7 @@ impl<R: AsyncRead + Unpin> PartialCar<R> {
                 let Some((cid, data)) = self.car.next_block().await? else {
                     break;
                 };
+                verify_block_cid(&cid, &data)?;
                 if cid == self.root {
                     let c: Commit = serde_ipld_dagcbor::from_slice(&data)?;
                     self.commit = Some(c);
@@ -646,6 +675,8 @@ pub enum JacquardLoadError {
     MissingCommit,
     #[error("failed to walk mst: {0}")]
     WalkError(#[from] WalkError),
+    #[error("block did not match its cid: {0}")]
+    BadCid(#[from] Box<CidMismatch>),
 }
 
 #[cfg(feature = "jacquard")]
@@ -655,7 +686,7 @@ impl DriverBuilder {
     /// Synchronous alternative to [`load_car`] for callers that already hold a
     /// `ParsedCar` from the jacquard ecosystem. The block processor from
     /// [`with_block_processor`] is applied; the memory limit is ignored since all
-    /// blocks are already in memory.
+    /// blocks are already in memory. Every block is verified against its CID.
     pub fn load_jacquard_parsed_car(
         &self,
         parsed: jacquard_repo::car::reader::ParsedCar,
@@ -671,6 +702,7 @@ impl DriverBuilder {
             .get(&root)
             .ok_or(JacquardLoadError::MissingCommit)?
             .as_ref();
+        verify_block_cid(&root, commit_bytes)?;
         let commit: Commit = serde_ipld_dagcbor::from_slice(commit_bytes)?;
 
         // Build the block map from all non-commit blocks.
@@ -679,6 +711,7 @@ impl DriverBuilder {
             if cid == root {
                 continue;
             }
+            verify_block_cid(&cid, data.as_ref())?;
             let maybe_processed = MaybeProcessedBlock::maybe(process, data.to_vec());
             blocks.insert(ObjectLink::from(cid), maybe_processed);
         }

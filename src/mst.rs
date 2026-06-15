@@ -88,6 +88,46 @@ pub fn atproto_mst_layer(key: &str) -> Layer {
     u128::from_be_bytes(Sha256::digest(key).split_at(16).0.try_into().unwrap()).leading_zeros() / 2
 }
 
+/// A block's bytes did not hash to the CID that referenced it.
+///
+/// atproto blocks are content-addressed: the CID embeds a sha-256 of the bytes,
+/// so a mismatch means the data was corrupted or tampered with in transit.
+#[derive(Debug, thiserror::Error)]
+#[error("block bytes do not match their cid: claimed {claimed}, computed {computed}")]
+pub struct CidMismatch {
+    /// the CID the CAR used to reference the block
+    pub claimed: Cid,
+    /// the CID actually computed from the block's bytes
+    pub computed: Cid,
+}
+
+/// Verify a block's bytes against the CID that referenced it.
+///
+/// atproto permits exactly one CID form: CIDv1 / dag-cbor (`0x71`) / sha-256
+/// (`0x12`) — the byte prefix `0x01711220`. Recomputes that CID from the bytes
+/// and compares. Repos routinely come from untrusted sources, so this is applied
+/// on every block read out of a CAR and cannot be disabled.
+pub(crate) fn verify_block_cid(claimed: &Cid, bytes: &[u8]) -> Result<(), Box<CidMismatch>> {
+    use cid::multihash::Multihash;
+    const DAG_CBOR: u64 = 0x71;
+    const SHA2_256: u64 = 0x12;
+
+    let digest = Sha256::digest(bytes);
+    // wrap only fails if the digest exceeds the 64-byte multihash allocation;
+    // a sha-256 digest is 32 bytes, so this is infallible here.
+    let mh = Multihash::<64>::wrap(SHA2_256, &digest)
+        .expect("sha-256 digest is 32 bytes, within the 64-byte multihash limit");
+    let computed = Cid::new_v1(DAG_CBOR, mh);
+    if &computed == claimed {
+        Ok(())
+    } else {
+        Err(Box::new(CidMismatch {
+            claimed: *claimed,
+            computed,
+        }))
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct MstNode {
     pub layer: Option<Layer>, // known for nodes with entries (required for root)
